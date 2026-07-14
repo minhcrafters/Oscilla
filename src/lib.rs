@@ -1,0 +1,479 @@
+//! Oscilla — programmable oscillator synthesizer plugin.
+//!
+//! A cross-platform VST3/CLAP software synthesizer based around a custom
+//! lightweight scripting language that lets users program their own
+//! oscillator waveforms. Think of it as a "shader language for sound."
+
+pub mod dsp;
+pub mod gui;
+pub mod preset;
+pub mod script;
+pub mod wavetable;
+
+use crate::dsp::filter::FilterType;
+use crate::dsp::{SynthEngine, WavetableSlot};
+use crate::script::ScriptCompiler;
+use crate::wavetable::default_wavetable;
+use atomic_refcell::AtomicRefCell;
+use nice_plug::prelude::*;
+use nice_plug_iced::iced::PollSubNotifier;
+use nice_plug_iced::iced::widget::text_editor;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
+/// ── Plugin ───────────────────────────────────────────────────────────
+
+pub struct Oscilla {
+    params: Arc<OscillaParams>,
+    engine: SynthEngine,
+    wavetable_slot: Arc<WavetableSlot>,
+    compiler: Arc<ScriptCompiler>,
+    peak_output: Arc<AtomicF32>,
+    notifier: PollSubNotifier,
+    sample_rate: f32,
+    /// True until the first process() call compiles the saved script.
+    needs_init_compile: bool,
+}
+
+/// ── Background tasks ─────────────────────────────────────────────────
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub enum OscillaTask {
+    CompileScript(String),
+}
+
+impl Default for Oscilla {
+    fn default() -> Self {
+        let sample_rate = 44100.0;
+        let default_table = default_wavetable();
+
+        Self {
+            params: Arc::new(OscillaParams::default()),
+            engine: SynthEngine::new(sample_rate),
+            wavetable_slot: Arc::new(WavetableSlot::new(Arc::new(default_table))),
+            compiler: Arc::new(ScriptCompiler::new()),
+            peak_output: Arc::new(AtomicF32::new(0.0)),
+            notifier: PollSubNotifier::new(),
+            sample_rate,
+            needs_init_compile: true,
+        }
+    }
+}
+
+/// ── Parameters ───────────────────────────────────────────────────────
+
+/// Helper: parse a string as f32.
+fn parse_f32(s: &str) -> Option<f32> {
+    s.parse().ok()
+}
+
+#[derive(Params)]
+pub struct OscillaParams {
+    #[persist = "window-state"]
+    pub window_state: Arc<nice_plug_iced::WindowState>,
+
+    #[id = "volume"]
+    pub volume: FloatParam,
+
+    #[id = "attack"]
+    pub attack: FloatParam,
+
+    #[id = "decay"]
+    pub decay: FloatParam,
+
+    #[id = "sustain"]
+    pub sustain: FloatParam,
+
+    #[id = "release"]
+    pub release: FloatParam,
+
+    #[id = "cutoff"]
+    pub filter_cutoff: FloatParam,
+
+    #[id = "resonance"]
+    pub filter_resonance: FloatParam,
+
+    #[id = "filter_type"]
+    pub filter_type: IntParam,
+
+    #[id = "unison"]
+    pub unison_voices: FloatParam,
+
+    #[id = "detune"]
+    pub detune_cents: FloatParam,
+
+    #[id = "width"]
+    pub stereo_width: FloatParam,
+
+    #[id = "glide"]
+    pub glide_time: FloatParam,
+
+    /// The wave script is persisted but not automatable.
+    #[persist = "wave-script"]
+    pub wave_script: AtomicRefCell<String>,
+}
+
+impl Default for OscillaParams {
+    fn default() -> Self {
+        const W: u32 = 820;
+        const H: u32 = 540;
+
+        Self {
+            window_state: nice_plug_iced::WindowState::from_logical_size(W, H),
+
+            volume: FloatParam::new("Volume", 0.8, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_smoother(SmoothingStyle::Linear(20.0))
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
+
+            attack: FloatParam::new(
+                "Attack",
+                0.01,
+                FloatRange::Skewed {
+                    min: 0.001,
+                    max: 4.0,
+                    factor: FloatRange::skew_factor(-2.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(10.0))
+            .with_unit(" s")
+            .with_value_to_string(Arc::new(|v| format!("{v:.3}")))
+            .with_string_to_value(Arc::new(parse_f32)),
+
+            decay: FloatParam::new(
+                "Decay",
+                0.2,
+                FloatRange::Skewed {
+                    min: 0.001,
+                    max: 4.0,
+                    factor: FloatRange::skew_factor(-2.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(10.0))
+            .with_unit(" s")
+            .with_value_to_string(Arc::new(|v| format!("{v:.3}")))
+            .with_string_to_value(Arc::new(parse_f32)),
+
+            sustain: FloatParam::new("Sustain", 0.7, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_smoother(SmoothingStyle::Linear(10.0))
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
+
+            release: FloatParam::new(
+                "Release",
+                0.4,
+                FloatRange::Skewed {
+                    min: 0.001,
+                    max: 8.0,
+                    factor: FloatRange::skew_factor(-2.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(10.0))
+            .with_unit(" s")
+            .with_value_to_string(Arc::new(|v| format!("{v:.3}")))
+            .with_string_to_value(Arc::new(parse_f32)),
+
+            filter_cutoff: FloatParam::new(
+                "Cutoff",
+                5000.0,
+                FloatRange::Skewed {
+                    min: 20.0,
+                    max: 20000.0,
+                    factor: FloatRange::skew_factor(-1.5),
+                },
+            )
+            .with_smoother(SmoothingStyle::Logarithmic(30.0))
+            .with_unit(" Hz")
+            .with_value_to_string(formatters::v2s_f32_hz_then_khz(0))
+            .with_string_to_value(formatters::s2v_f32_hz_then_khz()),
+
+            filter_resonance: FloatParam::new(
+                "Resonance",
+                0.0,
+                FloatRange::Linear {
+                    min: 0.0,
+                    max: 0.99,
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(10.0))
+            .with_value_to_string(formatters::v2s_f32_percentage(0))
+            .with_string_to_value(formatters::s2v_f32_percentage()),
+
+            filter_type: IntParam::new("Filter Type", 0, IntRange::Linear { min: 0, max: 2 }),
+
+            unison_voices: FloatParam::new(
+                "Unison",
+                1.0,
+                FloatRange::Linear { min: 1.0, max: 7.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(5.0))
+            .with_value_to_string(Arc::new(|v| format!("{}", v as i32)))
+            .with_string_to_value(Arc::new(parse_f32)),
+
+            detune_cents: FloatParam::new(
+                "Detune",
+                10.0,
+                FloatRange::Linear {
+                    min: 0.0,
+                    max: 50.0,
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(10.0))
+            .with_unit(" cents")
+            .with_value_to_string(Arc::new(|v| format!("{v:.0}")))
+            .with_string_to_value(Arc::new(parse_f32)),
+
+            stereo_width: FloatParam::new("Width", 0.5, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_smoother(SmoothingStyle::Linear(10.0))
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
+
+            glide_time: FloatParam::new(
+                "Glide",
+                0.05,
+                FloatRange::Skewed {
+                    min: 0.0,
+                    max: 2.0,
+                    factor: FloatRange::skew_factor(-1.5),
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(10.0))
+            .with_unit(" s")
+            .with_value_to_string(Arc::new(|v| format!("{v:.3}")))
+            .with_string_to_value(Arc::new(parse_f32)),
+
+            wave_script: AtomicRefCell::new(String::from("sin(x)")),
+        }
+    }
+}
+
+/// ── Plugin trait ─────────────────────────────────────────────────────
+
+impl Plugin for Oscilla {
+    const NAME: &'static str = "Oscilla";
+    const VENDOR: &'static str = "pychael";
+    const URL: &'static str = "https://pychael.me";
+    const EMAIL: &'static str = "dev@pychael.me";
+    const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+
+    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
+        AudioIOLayout {
+            main_input_channels: None,
+            main_output_channels: NonZeroU32::new(2),
+            ..AudioIOLayout::const_default()
+        },
+        AudioIOLayout {
+            main_input_channels: None,
+            main_output_channels: NonZeroU32::new(1),
+            ..AudioIOLayout::const_default()
+        },
+    ];
+
+    const MIDI_INPUT: MidiConfig = MidiConfig::Basic;
+    const SAMPLE_ACCURATE_AUTOMATION: bool = true;
+
+    type SysExMessage = ();
+    type BackgroundTask = OscillaTask;
+
+    fn params(&self) -> Arc<dyn Params> {
+        self.params.clone()
+    }
+
+    fn task_executor(&mut self) -> Box<dyn Fn(Self::BackgroundTask) + Send> {
+        let slot = self.wavetable_slot.clone();
+        let compiler = self.compiler.clone();
+        let notifier = self.notifier.clone();
+
+        Box::new(move |task| match task {
+            OscillaTask::CompileScript(source) => match compiler.compile(&source) {
+                Ok(()) => match compiler.generate_wavetable() {
+                    Ok(new_table) => {
+                        slot.store(new_table);
+                        notifier.notify();
+                    }
+                    Err(e) => log::error!("Oscilla: wavetable generation: {e}"),
+                },
+                Err(e) => log::error!("Oscilla: script compile: {e}"),
+            },
+        })
+    }
+
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        let initial_text = self.params.wave_script.borrow().clone();
+        let editor_state = gui::OscillaEditorState {
+            params: self.params.clone(),
+            wavetable_slot: self.wavetable_slot.clone(),
+            peak_output: self.peak_output.clone(),
+            notifier: self.notifier.clone(),
+            compiler: self.compiler.clone(),
+            script_content: text_editor::Content::with_text(&initial_text),
+        };
+
+        nice_plug_iced::create_iced_editor(
+            self.params.window_state.clone(),
+            editor_state,
+            self.notifier.clone(),
+            Default::default(),
+            |es, ctx| {
+                nice_plug_iced::application(
+                    es,
+                    ctx,
+                    gui::OscillaGui::new,
+                    gui::OscillaGui::update,
+                    gui::OscillaGui::view,
+                )
+                .theme(gui::OscillaGui::theme)
+                .subscription(|_| nice_plug_iced::iced::poll_events().map(|_| gui::Message::Poll))
+                .run()
+            },
+        )
+    }
+
+    fn initialize(
+        &mut self,
+        _audio_io_layout: &AudioIOLayout,
+        buffer_config: &BufferConfig,
+        _context: &mut impl InitContext<Self>,
+    ) -> bool {
+        self.sample_rate = buffer_config.sample_rate as f32;
+        self.engine.set_sample_rate(self.sample_rate);
+        true
+    }
+
+    fn process(
+        &mut self,
+        buffer: &mut Buffer,
+        _aux: &mut AuxiliaryBuffers,
+        context: &mut impl ProcessContext<Self>,
+    ) -> ProcessStatus {
+        // ── One-time: compile saved script on first audio callback ──
+        if self.needs_init_compile {
+            self.needs_init_compile = false;
+            let script = self.params.wave_script.borrow().clone();
+            if script != "sin(x)" {
+                if let Err(e) = self.compiler.compile(&script) {
+                    log::error!("Oscilla: init compile error: {e}");
+                } else if let Ok(table) = self.compiler.generate_wavetable() {
+                    self.wavetable_slot.store(table);
+                }
+            }
+        }
+
+        let table = self.wavetable_slot.load();
+        let mut next_event = context.next_event();
+        let mut had_events = false;
+        let mut peak = 0.0f32;
+
+        // ── Per-block parameter update ─────────────────────────────
+        // These push to all voices and are moderately expensive — do them
+        // once per block rather than once per sample.
+        let ft = match self.params.filter_type.modulated_plain_value() {
+            0 => FilterType::LowPass,
+            1 => FilterType::HighPass,
+            _ => FilterType::BandPass,
+        };
+        self.engine.update_block_params(
+            self.params.attack.smoothed.next(),
+            self.params.decay.smoothed.next(),
+            self.params.sustain.smoothed.next(),
+            self.params.release.smoothed.next(),
+            self.params.filter_cutoff.smoothed.next(),
+            self.params.filter_resonance.smoothed.next(),
+            ft,
+            self.params.unison_voices.smoothed.next() as usize,
+            self.params.detune_cents.smoothed.next(),
+            self.params.stereo_width.smoothed.next(),
+            self.params.glide_time.smoothed.next(),
+        );
+
+        // ── Single-pass: collect MIDI + render audio together ──────
+        for (sample_id, channel_samples) in buffer.iter_samples().enumerate() {
+            // Process any MIDI events at this sample position.
+            while let Some(event) = next_event {
+                if event.timing() > sample_id as u32 {
+                    break;
+                }
+                match event {
+                    NoteEvent::NoteOn { note, velocity, .. } => {
+                        self.engine.note_on(note, velocity);
+                        had_events = true;
+                    }
+                    NoteEvent::NoteOff { note, .. } => {
+                        self.engine.note_off(note);
+                        had_events = true;
+                    }
+                    _ => {}
+                }
+                next_event = context.next_event();
+            }
+
+            // Dispatch voice allocation when events arrive.
+            if had_events {
+                self.engine.process_events();
+                had_events = false;
+            }
+
+            // Advance volume smoother per-sample for sample-accurate automation.
+            self.engine.set_volume(self.params.volume.smoothed.next());
+
+            // Render one sample.
+            let (l, r) = self.engine.process_sample(&table);
+
+            let mut ch = channel_samples.into_iter();
+            if let Some(s) = ch.next() {
+                *s = l;
+            }
+            if let Some(s) = ch.next() {
+                *s = r;
+            }
+
+            let abs = l.abs().max(r.abs());
+            if abs > peak {
+                peak = abs;
+            }
+        }
+
+        // ── Update peak meter ────────────────────────────────────
+        if self.params.window_state.is_open() {
+            let cur = self.peak_output.load(Ordering::Relaxed);
+            let new = if peak > cur {
+                peak
+            } else {
+                cur * 0.9995 + peak * 0.0005
+            };
+            if (cur - new).abs() > 0.0001 {
+                self.peak_output.store(new, Ordering::Relaxed);
+                self.notifier.notify();
+            }
+        }
+
+        ProcessStatus::KeepAlive
+    }
+
+    fn deactivate(&mut self) {}
+}
+
+/// ── Format exports ───────────────────────────────────────────────────
+
+impl ClapPlugin for Oscilla {
+    const CLAP_ID: &'static str = "me.pychael.oscilla.synth";
+    const CLAP_DESCRIPTION: Option<&'static str> =
+        Some("Programmable oscillator synthesizer — a shader language for sound");
+    const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
+    const CLAP_SUPPORT_URL: Option<&'static str> = None;
+    const CLAP_FEATURES: &'static [ClapFeature] = &[
+        ClapFeature::Instrument,
+        ClapFeature::Stereo,
+        ClapFeature::Synthesizer,
+    ];
+}
+
+impl Vst3Plugin for Oscilla {
+    const VST3_CLASS_ID: [u8; 16] = *b"OscillaSynth001!";
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
+        &[Vst3SubCategory::Instrument, Vst3SubCategory::Synth];
+}
+
+nice_export_clap!(Oscilla);
+nice_export_vst3!(Oscilla);

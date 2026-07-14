@@ -1,0 +1,46 @@
+[package]
+name = "oscilla"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "oscilla-standalone"
+path = "src/main.rs"
+
+[dependencies]
+nice-plug = { version = "0.1", features = ["standalone"] }
+nice-plug-iced = { version = "0.1", features = ["canvas", "highlighter", "image"] }
+iced_audio = { version = "0.14", features = ["nice-plug"] }
+rhai = { version = "1.25", features = ["sync"] }
+realfft = "3.5"
+rustfft = "6"
+arc-swap = "1"
+smallvec = "1"
+atomic_refcell = "0.1"
+iced_highlighter = "0.14"
+log = { version = "0.4", features = [
+    "max_level_debug",
+    "release_max_level_info",
+] }
+tracing = { version = "0.1", features = [
+    "max_level_info",
+    "release_max_level_info",
+] }
+
+# Enable a small amount of optimization in the dev profile.
+[profile.dev]
+opt-level = 1
+
+# Enable more optimization in the release profile at the cost of compile time.
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"
