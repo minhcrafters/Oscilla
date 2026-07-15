@@ -293,29 +293,34 @@ impl Plugin for Oscilla {
         let tb_slot = self.time_buffer_slot.clone();
         let compiler = self.compiler.clone();
         let notifier = self.notifier.clone();
-        let sr = self.sample_rate.load(Ordering::Relaxed);
+        let sr = self.sample_rate.clone();
 
         Box::new(move |task| match task {
             OscillaTask::CompileScript { source, mode } => match compiler.compile(&source, mode) {
-                Ok(()) => match compiler.generate_both(mode, sr) {
-                    Ok((wt_opt, tb_opt)) => {
-                        if let Some(wt) = wt_opt {
-                            wt_slot.store(wt);
+                Ok(()) => {
+                    let rate = sr.load(Ordering::Relaxed);
+                    match compiler.generate_both(mode, rate) {
+                        Ok((wt_opt, tb_opt)) => {
+                            if let Some(wt) = wt_opt {
+                                wt_slot.store(wt);
+                            }
+                            if let Some(tb) = tb_opt {
+                                tb_slot.store(tb);
+                            }
+                            notifier.notify();
                         }
-                        if let Some(tb) = tb_opt {
-                            tb_slot.store(tb);
-                        }
-                        notifier.notify();
+                        Err(e) => log::error!("Oscilla: buffer generation: {e}"),
                     }
-                    Err(e) => log::error!("Oscilla: buffer generation: {e}"),
-                },
+                }
                 Err(e) => log::error!("Oscilla: script compile: {e}"),
             },
         })
     }
 
-    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+    fn editor(&mut self, async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         let initial_text = self.params.wave_script.borrow().clone();
+        let executor: Arc<dyn Fn(OscillaTask) + Send + Sync> =
+            Arc::new(move |task| async_executor.execute_background(task));
         let editor_state = gui::OscillaEditorState {
             params: self.params.clone(),
             wavetable_slot: self.wavetable_slot.clone(),
@@ -324,6 +329,7 @@ impl Plugin for Oscilla {
             notifier: self.notifier.clone(),
             compiler: self.compiler.clone(),
             sample_rate: self.sample_rate.clone(),
+            async_executor: executor,
             script_content: text_editor::Content::with_text(&initial_text),
         };
 
