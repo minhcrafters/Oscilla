@@ -341,17 +341,29 @@ impl OscillaGui {
         ) -> iced::widget::Container<'a, Message> {
             container(column![heading(label), kids].spacing(10))
                 .style(|_| section_panel())
-                .padding(14)
+                .padding(12)
                 .width(Length::Fill)
         }
 
         // ── Script editor (fills leftover space) ───────────────────
         let editor = text_editor(&self.editor_state.script_content)
-            .placeholder("Enter expression... e.g. sin(x) + sin(x*3)*0.25")
+            .placeholder("Enter expression...")
             .on_action(Message::EditorAction)
             .font(Font::MONOSPACE)
             .size(iced::Pixels(13.0))
             .height(Length::Fill)
+            .padding(8)
+            .key_binding(|key_press| {
+                if key_press.key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)
+                    && key_press
+                        .modifiers
+                        .contains(iced::keyboard::Modifiers::CTRL)
+                {
+                    Some(text_editor::Binding::Custom(Message::CompileScript))
+                } else {
+                    text_editor::Binding::from_key_press(key_press)
+                }
+            })
             .style(|_theme, _status| text_editor::Style {
                 background: Background::Color(BG_DEEP),
                 border: Border {
@@ -367,7 +379,7 @@ impl OscillaGui {
 
         let ok = if self.compile_ok { GREEN } else { RED };
 
-        let compile_btn = button(btn_text("Compile & Apply"))
+        let compile_btn = button(btn_text("Apply"))
             .on_press(Message::CompileScript)
             .padding([6, 18])
             .style(|_theme, status| match status {
@@ -432,7 +444,7 @@ impl OscillaGui {
 
         let preview_panel = container(preview)
             .style(|_| section_panel())
-            .padding(4)
+            .padding(12)
             .width(Length::Fill);
 
         // ── Envelope ───────────────────────────────────────────────
@@ -568,18 +580,19 @@ impl OscillaGui {
         } else {
             format!("{:.1} dB", self.peak_output_db)
         };
-        let footer = container(
-            row![
-                text("Oscilla").size(11).color(FG_DIM).font(Font {
+        let footer = container(row![
+            text(format!("Oscilla v{}", env!("CARGO_PKG_VERSION")))
+                .size(11)
+                .color(FG_DIM)
+                .font(Font {
                     weight: font::Weight::Bold,
                     ..Font::MONOSPACE
                 }),
-                peak_text(peak),
-            ]
-            .spacing(16),
-        )
+            iced::widget::Space::new().width(Length::Fill),
+            peak_text(peak),
+        ])
         .style(|_| section_panel())
-        .padding([8, 14])
+        .padding(12)
         .width(Length::Fill);
 
         // ── Grid layout ────────────────────────────────────────────
@@ -601,7 +614,7 @@ impl OscillaGui {
         .width(Length::FillPortion(3));
 
         let right = column![envelope, filter, unison, master, footer]
-            .spacing(8)
+            .spacing(10)
             .width(Length::FillPortion(2));
 
         container(row![left, right].spacing(12).padding(12))
