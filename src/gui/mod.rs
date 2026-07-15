@@ -413,7 +413,7 @@ impl OscillaGui {
 
         let editor_panel = container(
             column![
-                heading("WAVEFORM SCRIPT"),
+                heading("SCRIPT"),
                 mode_column,
                 editor,
                 row![compile_btn, status_text(&self.status_message, ok),]
