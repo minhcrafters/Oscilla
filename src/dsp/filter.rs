@@ -33,29 +33,20 @@ impl std::fmt::Display for FilterType {
         }
     }
 }
+const STATE_BLOWUP_LIMIT: f32 = 1e6;
 
-/// Maximum absolute value of the internal state variables before the filter
-/// is considered to have blown up and is auto-reset.
-const MAX_STATE: f32 = 64.0;
-
-/// Upper bound for the `f` coefficient *after* halving for oversampling.
-/// Equivalent to an un-oversampled `f ≤ 1.70`, safely below the `f < 2.0`
-/// hard limit even at maximum resonance.
+/// Upper bound for `f` after halving for oversampling.
 const F_MAX: f32 = 0.85;
 
 #[derive(Debug, Clone)]
 pub struct Svf {
-    /// Low-pass integrator state.
     lp: f32,
-    /// Band-pass integrator state.
     bp: f32,
-    /// Frequency coefficient (already halved for 2× oversampling).
     f: f32,
-    /// Damping coefficient: `q = 1 − resonance`.
     q: f32,
     mode: FilterType,
+    // Cached for sample-rate changes.
     sr: f32,
-    /// Cached cutoff in Hz so we can recompute `f` after a sample-rate change.
     cutoff_hz: f32,
 }
 
@@ -120,18 +111,15 @@ impl Svf {
     fn sanitize(&mut self) {
         if !self.lp.is_finite()
             || !self.bp.is_finite()
-            || self.lp.abs() > MAX_STATE
-            || self.bp.abs() > MAX_STATE
+            || self.lp.abs() > STATE_BLOWUP_LIMIT
+            || self.bp.abs() > STATE_BLOWUP_LIMIT
         {
             self.lp = 0.0;
             self.bp = 0.0;
         }
     }
 
-    /// Process a single mono sample with **2× internal oversampling**.
-    ///
-    /// The filter is run twice, each time with `f/2` effectively halved by
-    /// the oversampling strategy.  The output of the second pass is returned.
+    /// Oversampled 2-pass filter for stability near Nyquist.
     #[inline]
     pub fn process(&mut self, input: f32) -> f32 {
         // Pass 1
@@ -155,12 +143,7 @@ impl Svf {
         }
     }
 
-    /// Process a stereo pair through a **single** filter state.
-    ///
-    /// Filter the mid (L+R) signal, apply the filter, then reconstruct L/R
-    /// using the original side (L−R) signal.  This avoids running two separate
-    /// samples through the same feedback loop per audio frame, which was the
-    /// double-feedback problem causing extra instability.
+    /// Mid-side stereo: filters only the mid channel to avoid double-feedback.
     #[inline]
     pub fn process_stereo(&mut self, left: f32, right: f32) -> (f32, f32) {
         let mid = (left + right) * 0.5;

@@ -1,16 +1,8 @@
-//! Single polyphonic voice.
-//!
-//! Each voice has a phase accumulator for wavetable lookup, its own
-//! ADSR envelope, a state-variable filter, and optional unison sub-oscillators
-//! with detune and stereo spread.
-
 use super::envelope::Adsr;
 use super::filter::{FilterType, Svf};
 
-/// Maximum number of unison voices per note.
 pub const MAX_UNISON: usize = 7;
 
-/// Interpolation between wavetable samples.
 #[inline]
 fn lerp_wave(table: &[f32; crate::wavetable::WAVETABLE_SIZE], phase: f32) -> f32 {
     let idx = phase as usize;
@@ -20,46 +12,23 @@ fn lerp_wave(table: &[f32; crate::wavetable::WAVETABLE_SIZE], phase: f32) -> f32
     a + (b - a) * frac
 }
 
-/// Per-voice state machine.
 pub struct Voice {
-    /// Sample index into the phase-normalized table (0..2048).
     pub phase: f32,
-    /// Per-sample phase increment.
     pub inc: f32,
-    /// Target increment (for glide).
     pub inc_target: f32,
-    /// Glide rate per sample (0 = instant, < 1 = slow).
     pub glide_rate: f32,
-
-    /// Velocity scaling (0..1).
     pub velocity: f32,
-    /// Current velocity scaling (smoothed for glide).
     pub cur_velocity: f32,
-
-    /// MIDI note number (for tracking).
     pub note: u8,
-    /// Whether this voice is currently playing.
     pub active: bool,
-    /// Age counter for voice stealing.
     pub age: u32,
-
-    /// Amplitude envelope.
     pub env: Adsr,
-    /// Per-voice filter.
     pub filt: Svf,
-
-    /// Unison sub-oscillator phases.
     pub unison_phases: [f32; MAX_UNISON],
-    /// Pre-computed detune factors for each unison voice.
     pub unison_detunes: [f32; MAX_UNISON],
-    /// Pan values for each unison voice (-1..1).
     pub unison_pans: [f32; MAX_UNISON],
-
-    /// Track absolute seconds elapsed for time-dependent DSP expressions
     pub time_elapsed: f32,
-    /// Read position within the time-domain buffer (time-based mode).
     pub time_buf_pos: f32,
-    /// Standard sample rate copy needed for increment calculations
     pub sample_rate: f32,
 }
 
@@ -87,14 +56,12 @@ impl Voice {
         }
     }
 
-    /// Compute phase increment from a MIDI note number and sample rate.
     #[inline]
     pub fn note_to_inc(note: u8, sample_rate: f32) -> f32 {
         440.0 * (2.0f32).powf((note as f32 - 69.0) / 12.0) / sample_rate
             * crate::wavetable::WAVETABLE_SIZE as f32
     }
 
-    /// Start a note on this voice.
     pub fn note_on(&mut self, note: u8, vel: f32, sr: f32, glide: f32) {
         let target_inc = Self::note_to_inc(note, sr);
         self.note = note;
@@ -128,19 +95,16 @@ impl Voice {
         self.time_buf_pos = 0.0;
     }
 
-    /// Release the note.
     #[inline]
     pub fn note_off(&mut self) {
         self.env.note_off();
     }
 
-    /// Return true when the envelope has finished and voice can be stolen.
     #[inline]
     pub fn finished(&self) -> bool {
         self.env.finished()
     }
 
-    /// Set filter parameters from shared settings.
     #[inline]
     pub fn set_filter(&mut self, cutoff: f32, res: f32, ftype: FilterType) {
         self.filt.set_cutoff(cutoff);
@@ -148,7 +112,6 @@ impl Voice {
         self.filt.set_type(ftype);
     }
 
-    /// Set unison parameters. Recomputes detune factors and pan values.
     pub fn set_unison(&mut self, voices: usize, detune_cents: f32, width: f32) {
         let n = voices.clamp(1, MAX_UNISON);
         let detune_semitones = detune_cents / 100.0;
@@ -175,8 +138,6 @@ impl Voice {
         }
     }
 
-    /// Process one sample for this voice. Returns (left, right) output.
-    /// Pan values are mapped linearly.
     #[inline]
     pub fn process(
         &mut self,
@@ -250,10 +211,7 @@ impl Voice {
         (left, right)
     }
 
-    /// Process one sample in time-based mode.
-    ///
-    /// Reads from a pre-rendered time-domain buffer, advancing the read
-    /// pointer at a rate proportional to the note frequency (1× at A4=440 Hz).
+    /// Reads time-domain buffer at a rate proportional to note frequency (1× at A4).
     #[inline]
     pub fn process_time(&mut self, time_buf: &[f32]) -> (f32, f32) {
         if !self.active || time_buf.is_empty() {

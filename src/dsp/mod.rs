@@ -1,9 +1,3 @@
-//! Polyphonic synthesizer engine.
-//!
-//! Manages a pool of voices with voice stealing, MIDI-to-frequency
-//! conversion, unison, glide, and output mixing. All hot-path code
-//! is allocation-free and uses only stack-local state.
-
 pub mod envelope;
 pub mod filter;
 pub mod voice;
@@ -14,14 +8,10 @@ use crate::script::ScriptMode;
 use crate::wavetable::{SharedTimeBuffer, SharedWavetable, WAVETABLE_SIZE};
 use arc_swap::ArcSwap;
 use smallvec::SmallVec;
-/// Maximum number of polyphonic voices.
+
 pub const MAX_VOICES: usize = 16;
 
-/// Atomically swappable wavetable container.
-///
-/// The audio thread reads the current wavetable via `load()`, while
-/// a background compilation thread writes a new one via `store()`.
-/// Both operations are lock-free and realtime-safe.
+// Lock-free, realtime-safe. Audio thread reads, background thread writes.
 pub struct WavetableSlot {
     inner: ArcSwap<Box<[f32; WAVETABLE_SIZE]>>,
 }
@@ -43,10 +33,7 @@ impl WavetableSlot {
     }
 }
 
-/// Atomically swappable time-buffer container.
-///
-/// Same lock-free pattern as [`WavetableSlot`] but holds a variable-length
-/// time-domain buffer produced by time-based script mode.
+// Lock-free, realtime-safe. Audio thread reads, background thread writes.
 pub struct TimeBufferSlot {
     inner: ArcSwap<Vec<f32>>,
 }
@@ -68,24 +55,17 @@ impl TimeBufferSlot {
     }
 }
 
-/// A pending note command queued during MIDI processing.
 #[derive(Debug, Clone, Copy)]
 enum NoteCmd {
     On { note: u8, velocity: f32 },
     Off { note: u8 },
 }
 
-/// The main polyphonic synthesizer engine.
-///
-/// Owns a fixed-size pool of [`Voice`]s and coordinates MIDI note
-/// allocation, parameter updates, and per-sample audio generation.
 pub struct SynthEngine {
     voices: [Voice; MAX_VOICES],
     pending: SmallVec<[NoteCmd; 32]>,
     sample_rate: f32,
     volume: f32,
-
-    // Cached parameter values.
     filter_cutoff: f32,
     filter_resonance: f32,
     filter_type: FilterType,
@@ -93,7 +73,6 @@ pub struct SynthEngine {
     detune_cents: f32,
     stereo_width: f32,
     glide_time: f32,
-    /// Which script mode is active (wavetable or time-based).
     pub script_mode: ScriptMode,
 }
 
@@ -116,18 +95,15 @@ impl SynthEngine {
         }
     }
 
-    /// Queue a note-on event (processed by `process_events`).
     pub fn note_on(&mut self, note: u8, velocity: f32) {
         self.pending.push(NoteCmd::On { note, velocity });
     }
 
-    /// Queue a note-off event.
     pub fn note_off(&mut self, note: u8) {
         self.pending.push(NoteCmd::Off { note });
     }
 
-    /// Process all queued note commands, allocating and freeing voices.
-    /// Call once per block **after** all MIDI events have been queued.
+    /// Call once per block after all MIDI events have been queued.
     pub fn process_events(&mut self) {
         // Collect commands first to end the mutable borrow on self.pending
         // before calling methods that borrow self again.
@@ -140,11 +116,7 @@ impl SynthEngine {
         }
     }
 
-    /// Update "slow" parameters: filter, envelope, unison, glide.
-    ///
-    /// Call this **once per block** before the sample loop.  Pushing these
-    /// settings to all active voices is moderately expensive (it iterates over
-    /// all voices), so doing it every sample is wasteful.
+    /// Call once per block. Pushes settings to all voices (cheap).
     #[allow(clippy::too_many_arguments)]
     pub fn update_block_params(
         &mut self,
@@ -180,14 +152,12 @@ impl SynthEngine {
         }
     }
 
-    /// Set the master volume.  Cheap enough to call per-sample alongside
-    /// the smoother so volume automation remains sample-accurate.
     #[inline]
     pub fn set_volume(&mut self, vol: f32) {
         self.volume = vol;
     }
 
-    /// Find a free voice or steal the best candidate.
+    /// Prefers inactive → finished → oldest by age.
     fn allocate_voice(&mut self) -> Option<usize> {
         // Prefer completely inactive voices.
         for (i, v) in self.voices.iter().enumerate() {
@@ -229,7 +199,6 @@ impl SynthEngine {
         }
     }
 
-    /// Process a single stereo sample. Returns `(left, right)`.
     #[inline]
     pub fn process_sample(
         &mut self,
@@ -266,7 +235,6 @@ impl SynthEngine {
         (l_out, r_out)
     }
 
-    /// Notify all voices of a sample-rate change.
     pub fn set_sample_rate(&mut self, sr: f32) {
         self.sample_rate = sr;
         for v in self.voices.iter_mut() {
@@ -275,14 +243,11 @@ impl SynthEngine {
         }
     }
 
-    /// Number of currently active voices (for UI display).
     #[allow(dead_code)]
     pub fn active_voice_count(&self) -> usize {
         self.voices.iter().filter(|v| v.active).count()
     }
 
-    /// Playhead position (seconds) of the first active voice, or 0.
-    /// Used to draw the scrubber bar in the waveform preview.
     pub fn playhead_time(&self) -> f32 {
         self.voices
             .iter()

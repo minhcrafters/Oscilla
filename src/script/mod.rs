@@ -51,11 +51,11 @@ impl std::fmt::Display for ScriptMode {
     }
 }
 
-// ── DSP primitive functions ───────────────────────────────────────────
+// DSP primitives
 
 /// Simple pseudo-random function based on phase for deterministic "noise".
 fn phase_noise(x: f32) -> f32 {
-    let n = (x.sin() * 43758.5453).fract();
+    let n = (x.sin() * 43_758.547).fract();
     n * 2.0 - 1.0
 }
 
@@ -121,7 +121,7 @@ fn as_f32(v: rhai::Dynamic) -> Result<f32, Box<rhai::EvalAltResult>> {
     }
 }
 
-// ── Script engine ─────────────────────────────────────────────────────
+// Script engine
 
 /// Script engine that compiles and evaluates Oscilla waveform scripts.
 pub struct ScriptEngine {
@@ -145,7 +145,7 @@ impl ScriptEngine {
     pub fn compile(source: &str, mode: ScriptMode) -> Result<Self, String> {
         let mut engine = Engine::new();
 
-        // ── Register DSP / waveshaping functions ─────────────────────
+        // Register DSP / waveshaping functions
         // We use rhai::Dynamic to seamlessly accept f32, f64, or INT
         // and avoid missing function signatures.
 
@@ -203,7 +203,7 @@ impl ScriptEngine {
             },
         );
 
-        // ── Core math ────────────────────────────────────────────────────
+        // Core math
         macro_rules! reg_math {
             ($name:expr, $func:expr) => {
                 engine.register_fn(
@@ -238,7 +238,7 @@ impl ScriptEngine {
             },
         );
 
-        // ── Arithmetic fallback operators ────────────────────────────────
+        // Arithmetic fallback operators
         engine.register_fn(
             "+",
             |a: rhai::Dynamic,
@@ -316,7 +316,7 @@ impl ScriptEngine {
     }
 }
 
-// ── Thread-safe compiler wrapper ──────────────────────────────────────
+// Compiler wrapper
 
 /// Thread-safe wrapper for deferred compilation.
 ///
@@ -324,6 +324,12 @@ impl ScriptEngine {
 /// on a background thread, never on the audio callback.
 pub struct ScriptCompiler {
     engine: Mutex<Option<ScriptEngine>>,
+}
+
+impl Default for ScriptCompiler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ScriptCompiler {
@@ -347,7 +353,7 @@ impl ScriptCompiler {
         Ok(())
     }
 
-    // ── Wavetable generation ─────────────────────────────────────────
+    // Wavetable generation
 
     /// Sample the compiled waveform function into a wavetable.
     ///
@@ -400,7 +406,7 @@ impl ScriptCompiler {
         Ok(Arc::new(data))
     }
 
-    // ── Time-buffer generation ───────────────────────────────────────
+    // Time-buffer generation
 
     /// Generate a time-domain buffer by evaluating the script at regular
     /// time intervals.
@@ -477,7 +483,7 @@ impl ScriptCompiler {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────
+// Tests
 
 #[cfg(test)]
 mod tests {

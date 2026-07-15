@@ -21,7 +21,7 @@ use nice_plug_iced::iced::widget::text_editor;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-/// ── Plugin ───────────────────────────────────────────────────────────
+// Plugin
 
 pub struct Oscilla {
     params: Arc<OscillaParams>,
@@ -37,7 +37,7 @@ pub struct Oscilla {
     needs_init_compile: bool,
 }
 
-/// ── Background tasks ─────────────────────────────────────────────────
+// Background tasks
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -66,7 +66,7 @@ impl Default for Oscilla {
     }
 }
 
-/// ── Parameters ───────────────────────────────────────────────────────
+// Parameters
 
 /// Helper: parse a string as f32.
 fn parse_f32(s: &str) -> Option<f32> {
@@ -259,7 +259,7 @@ impl Default for OscillaParams {
     }
 }
 
-/// ── Plugin trait ─────────────────────────────────────────────────────
+// Plugin trait
 
 impl Plugin for Oscilla {
     const NAME: &'static str = "Oscilla";
@@ -356,7 +356,7 @@ impl Plugin for Oscilla {
         buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
-        self.sample_rate = buffer_config.sample_rate as f32;
+        self.sample_rate = buffer_config.sample_rate;
         self.engine.set_sample_rate(self.sample_rate);
         true
     }
@@ -367,7 +367,7 @@ impl Plugin for Oscilla {
         _aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        // ── One-time: compile saved script on first audio callback ──
+        // One-time: compile saved script on first audio callback
         if self.needs_init_compile {
             self.needs_init_compile = false;
             let script = self.params.wave_script.borrow().clone();
@@ -397,7 +397,7 @@ impl Plugin for Oscilla {
         let mut had_events = false;
         let mut peak = 0.0f32;
 
-        // ── Per-block parameter update ─────────────────────────────
+        // Per-block parameter update
         let mode = match self.params.script_mode.modulated_plain_value() {
             0 => ScriptMode::Wavetable,
             _ => ScriptMode::TimeBased,
@@ -422,7 +422,7 @@ impl Plugin for Oscilla {
             self.params.glide_time.smoothed.next(),
         );
 
-        // ── Single-pass: collect MIDI + render audio together ──────
+        // Single-pass: collect MIDI + render audio together
         for (sample_id, channel_samples) in buffer.iter_samples().enumerate() {
             // Process any MIDI events at this sample position.
             while let Some(event) = next_event {
@@ -469,7 +469,7 @@ impl Plugin for Oscilla {
             }
         }
 
-        // ── Update peak meter ────────────────────────────────────
+        // Update peak meter
         if self.params.window_state.is_open() {
             let cur = self.peak_output.load(Ordering::Relaxed);
             let new = if peak > cur {
@@ -493,7 +493,7 @@ impl Plugin for Oscilla {
     fn deactivate(&mut self) {}
 }
 
-/// ── Format exports ───────────────────────────────────────────────────
+// Format exports
 
 impl ClapPlugin for Oscilla {
     const CLAP_ID: &'static str = "me.pychael.oscilla.synth";

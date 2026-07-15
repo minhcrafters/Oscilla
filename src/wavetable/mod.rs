@@ -100,7 +100,7 @@ pub fn band_limit(data: &mut [f32; WAVETABLE_SIZE], max_harmonics: usize) {
     let fwd = planner.plan_fft_forward(WAVETABLE_SIZE);
     let inv = planner.plan_fft_inverse(WAVETABLE_SIZE);
 
-    // Forward FFT: real → complex.
+    // Forward FFT: real -> complex.
     let mut spectrum = fwd.make_output_vec();
     let mut scratch = fwd.make_scratch_vec();
     let mut input = data.to_vec();
@@ -108,11 +108,11 @@ pub fn band_limit(data: &mut [f32; WAVETABLE_SIZE], max_harmonics: usize) {
         .unwrap();
 
     // Zero out bins above max_harmonics.
-    for i in max_bin..spectrum.len() {
-        spectrum[i] = Complex::new(0.0, 0.0);
+    for i in spectrum.iter_mut().skip(max_bin) {
+        *i = Complex::new(0.0, 0.0);
     }
 
-    // Inverse FFT: complex → real.
+    // Inverse FFT: complex -> real.
     let mut output = inv.make_output_vec();
     let mut scratch_inv = inv.make_scratch_vec();
     inv.process_with_scratch(&mut spectrum, &mut output, &mut scratch_inv)

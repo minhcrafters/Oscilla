@@ -1,9 +1,3 @@
-//! ADSR envelope generator.
-//!
-//! A standard attack-decay-sustain-release envelope. Time values are in
-//! seconds and converted to per-sample increments based on the sample rate.
-//! All processing is branch-light and allocation-free.
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Idle,
@@ -20,7 +14,6 @@ pub struct Adsr {
     sustain_level: f32,
     release_inc: f32,
 
-    /// Raw time values stored so `set_sample_rate` can recompute correctly.
     attack_secs: f32,
     decay_secs: f32,
     release_secs: f32,
@@ -82,9 +75,6 @@ impl Adsr {
         };
     }
 
-    /// Update the sample rate and recompute all per-sample increments from the
-    /// stored raw time values.  Safe to call even if time values were never
-    /// explicitly set (they default to the constructor values).
     pub fn set_sample_rate(&mut self, sr: f32) {
         self.sr = sr;
         let a = self.attack_secs;
@@ -115,7 +105,6 @@ impl Adsr {
         self.value
     }
 
-    /// Advance one sample. Returns the current envelope level.
     #[inline]
     pub fn tick(&mut self) -> f32 {
         match self.phase {

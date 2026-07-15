@@ -25,22 +25,22 @@ use nice_plug_iced::{EditorState, NiceGuiContext};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-// ── VS Code Dark+ palette ─────────────────────────────────────────────
+// Palette
 
-const BG_DEEP: Color = Color::from_rgb(0.118, 0.118, 0.118); // #1E1E1E  editor background
-const SURFACE: Color = Color::from_rgb(0.145, 0.145, 0.149); // #252526  panel / sidebar
-const BORDER: Color = Color::from_rgb(0.235, 0.235, 0.235); // #3C3C3C  thin separators
-const ACCENT: Color = Color::from_rgb(0.0, 0.478, 0.8); // #007ACC  VS Code blue
-const ACCENT_SOFT: Color = Color::from_rgba(0.0, 0.478, 0.8, 0.12); // subtle wash (status bar, hover)
-const ACCENT_GLOW: Color = Color::from_rgba(0.0, 0.478, 0.8, 0.22); // waveform under-glow
-const ACCENT_LINE: Color = Color::from_rgba(0.0, 0.478, 0.8, 0.15); // waveform centre line
-const FG_DIM: Color = Color::from_rgb(0.522, 0.522, 0.522); // #858585  muted labels
-const FG_TEXT: Color = Color::from_rgb(0.831, 0.831, 0.831); // #D4D4D4  body text
-const GREEN: Color = Color::from_rgb(0.306, 0.788, 0.690); // #4EC9B0  terminal green (success)
-const RED: Color = Color::from_rgb(0.945, 0.298, 0.298); // #F14C4C  error red
-const YELLOW: Color = Color::from_rgb(0.875, 0.808, 0.0); // #DFCE00  warning yellow
+const BG_DEEP: Color = Color::from_rgb(0.118, 0.118, 0.118);
+const SURFACE: Color = Color::from_rgb(0.145, 0.145, 0.149);
+const BORDER: Color = Color::from_rgb(0.235, 0.235, 0.235);
+const ACCENT: Color = Color::from_rgb(0.0, 0.478, 0.8);
+const ACCENT_SOFT: Color = Color::from_rgba(0.0, 0.478, 0.8, 0.12);
+const ACCENT_GLOW: Color = Color::from_rgba(0.0, 0.478, 0.8, 0.22);
+const ACCENT_LINE: Color = Color::from_rgba(0.0, 0.478, 0.8, 0.15);
+const FG_DIM: Color = Color::from_rgb(0.522, 0.522, 0.522);
+const FG_TEXT: Color = Color::from_rgb(0.831, 0.831, 0.831);
+const GREEN: Color = Color::from_rgb(0.306, 0.788, 0.690);
+const RED: Color = Color::from_rgb(0.945, 0.298, 0.298);
+const YELLOW: Color = Color::from_rgb(0.875, 0.808, 0.0);
 
-// ── Typography ────────────────────────────────────────────────────────
+// Typography
 
 fn heading(label: &str) -> text::Text<'_> {
     text(label).size(10).color(FG_DIM).font(Font {
@@ -98,7 +98,7 @@ fn rad(r: f32) -> border::Radius {
     border::radius(r)
 }
 
-// ── Reusable style functions ──────────────────────────────────────────
+// Styles
 
 fn section_panel() -> container::Style {
     container::Style {
@@ -152,7 +152,7 @@ fn picklist_style() -> pick_list::Style {
     }
 }
 
-// ── Messages ──────────────────────────────────────────────────────────
+// Messages
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -176,7 +176,7 @@ pub enum Message {
     ScriptModeChanged(ScriptMode),
 }
 
-// ── Editor state ──────────────────────────────────────────────────────
+// Editor state
 
 pub struct OscillaEditorState {
     pub params: Arc<OscillaParams>,
@@ -190,7 +190,7 @@ pub struct OscillaEditorState {
     pub script_content: text_editor::Content,
 }
 
-// ── Application ───────────────────────────────────────────────────────
+// Application
 
 pub struct OscillaGui {
     editor_state: EditorState<OscillaEditorState>,
@@ -352,7 +352,7 @@ impl OscillaGui {
                 .width(Length::Fill)
         }
 
-        // ── Script editor (fills leftover space) ───────────────────
+        // Script editor
         let editor = text_editor(&self.editor_state.script_content)
             .placeholder("Enter expression...")
             .on_action(Message::EditorAction)
@@ -445,7 +445,7 @@ impl OscillaGui {
         .width(Length::Fill)
         .height(Length::Fill);
 
-        // ── Waveform preview (fixed height) ────────────────────────
+        // Waveform preview
         let preview = Canvas::new(WaveformPreview {
             wavetable: self.editor_state.wavetable_slot.load(),
             time_buffer: self.editor_state.time_buffer_slot.load(),
@@ -461,7 +461,7 @@ impl OscillaGui {
             .padding(12)
             .width(Length::Fill);
 
-        // ── Envelope ───────────────────────────────────────────────
+        // Envelope
         let envelope = section(
             "ENVELOPE",
             row![
@@ -493,7 +493,7 @@ impl OscillaGui {
             .spacing(14),
         );
 
-        // ── Filter ─────────────────────────────────────────────────
+        // Filter
         let ft = match p.filter_type.modulated_plain_value() {
             0 => FilterType::LowPass,
             1 => FilterType::HighPass,
@@ -542,7 +542,7 @@ impl OscillaGui {
             .spacing(14),
         );
 
-        // ── Unison ─────────────────────────────────────────────────
+        // Unison
         let unison = section(
             "UNISON",
             row![
@@ -568,7 +568,7 @@ impl OscillaGui {
             .spacing(14),
         );
 
-        // ── Master ─────────────────────────────────────────────────
+        // Master
         let master = section(
             "MASTER",
             row![
@@ -588,7 +588,7 @@ impl OscillaGui {
             .spacing(14),
         );
 
-        // ── Footer ─────────────────────────────────────────────────
+        // Footer
         let peak = if self.peak_output_db <= util::MINUS_INFINITY_DB {
             String::from("-- dB")
         } else {
@@ -609,17 +609,8 @@ impl OscillaGui {
         .padding(12)
         .width(Length::Fill);
 
-        // ── Grid layout ────────────────────────────────────────────
+        // Grid layout
         //
-        //  ┌──────────────────────────┬─────────────────┐
-        //  │  Script Editor (FILL)    │   ENVELOPE      │
-        //  │                          │   FILTER        │
-        //  │                          │   UNISON        │
-        //  ├──────────────────────────┤   MASTER        │
-        //  │  Waveform (fixed 100px)  │   FOOTER        │
-        //  └──────────────────────────┴─────────────────┘
-        //
-
         let left = column![
             editor_panel,  // fills remaining vertical space
             preview_panel, // fixed 100 px
@@ -645,7 +636,7 @@ impl OscillaGui {
     }
 }
 
-// ── Waveform preview canvas ───────────────────────────────────────────
+// Waveform preview
 
 struct WaveformPreview {
     wavetable: SharedWavetable,
@@ -743,7 +734,7 @@ impl Program<Message> for WaveformPreview {
                 .with_width(1.5),
         );
 
-        // ── Playhead bar (time-based mode only) ─────────────────
+        // Playhead bar
         if self.mode == ScriptMode::TimeBased && self.playhead_time > 0.0 {
             let t = self.playhead_time;
             let duration = TIME_BUFFER_DURATION;
