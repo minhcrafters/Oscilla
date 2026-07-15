@@ -30,6 +30,7 @@ pub struct Oscilla {
     time_buffer_slot: Arc<TimeBufferSlot>,
     compiler: Arc<ScriptCompiler>,
     peak_output: Arc<AtomicF32>,
+    playhead_time: Arc<AtomicF32>,
     notifier: PollSubNotifier,
     sample_rate: f32,
     /// True until the first process() call compiles the saved script.
@@ -57,6 +58,7 @@ impl Default for Oscilla {
             time_buffer_slot: Arc::new(TimeBufferSlot::new(Arc::new(default_time_buf))),
             compiler: Arc::new(ScriptCompiler::new()),
             peak_output: Arc::new(AtomicF32::new(0.0)),
+            playhead_time: Arc::new(AtomicF32::new(0.0)),
             notifier: PollSubNotifier::new(),
             sample_rate,
             needs_init_compile: true,
@@ -322,6 +324,7 @@ impl Plugin for Oscilla {
             wavetable_slot: self.wavetable_slot.clone(),
             time_buffer_slot: self.time_buffer_slot.clone(),
             peak_output: self.peak_output.clone(),
+            playhead_time: self.playhead_time.clone(),
             notifier: self.notifier.clone(),
             compiler: self.compiler.clone(),
             script_content: text_editor::Content::with_text(&initial_text),
@@ -478,6 +481,10 @@ impl Plugin for Oscilla {
                 self.peak_output.store(new, Ordering::Relaxed);
                 self.notifier.notify();
             }
+
+            // Update playhead position for waveform preview scrubber.
+            self.playhead_time
+                .store(self.engine.playhead_time(), Ordering::Relaxed);
         }
 
         ProcessStatus::KeepAlive

@@ -1,16 +1,22 @@
 //! Iced GUI for Oscilla — VS Code Dark IDE theme.
 
 use crate::OscillaParams;
-use crate::dsp::WavetableSlot;
-use crate::script::ScriptMode;
-use iced_audio::Gesture;
+use crate::dsp::filter::FilterType;
+use crate::dsp::{TimeBufferSlot, WavetableSlot};
+use crate::script::{ScriptCompiler, ScriptMode};
+use crate::wavetable::{SharedTimeBuffer, SharedWavetable, TIME_BUFFER_DURATION};
+use iced_audio::param::nice_to_iced;
+use iced_audio::{Gesture, Knob};
 use nice_plug::prelude::*;
 use nice_plug_iced::iced::{
-    self, Background, Border, Center, Color, Font, Length, PollSubNotifier, Shadow, Theme, border,
-    font,
+    Background, Border, Center, Color, Element, Font, Length, Pixels, Point, PollSubNotifier,
+    Rectangle, Renderer, Shadow, Size, Theme, Vector, border, font,
+    keyboard::key::Named as KeyNamed,
+    keyboard::{Key, Modifiers},
+    mouse::Cursor,
     theme::Palette,
     widget::{
-        button,
+        Column, Container, Row, Space, button,
         canvas::{self, Canvas, Frame, Geometry, Program},
         column, container, pick_list, row, text, text_editor,
     },
@@ -113,7 +119,7 @@ fn btn_style(hovered: bool) -> button::Style {
     let shadow = if hovered {
         Shadow {
             color: ACCENT_SOFT,
-            offset: iced::Vector::new(0.0, 1.0),
+            offset: Vector::new(0.0, 1.0),
             blur_radius: 6.0,
         }
     } else {
@@ -166,8 +172,8 @@ pub enum Message {
     WidthGestured(Gesture),
     GlideGestured(Gesture),
 
-    FilterTypeChanged(crate::dsp::filter::FilterType),
-    ScriptModeChanged(crate::script::ScriptMode),
+    FilterTypeChanged(FilterType),
+    ScriptModeChanged(ScriptMode),
 }
 
 // ── Editor state ──────────────────────────────────────────────────────
@@ -175,10 +181,11 @@ pub enum Message {
 pub struct OscillaEditorState {
     pub params: Arc<OscillaParams>,
     pub wavetable_slot: Arc<WavetableSlot>,
-    pub time_buffer_slot: Arc<crate::dsp::TimeBufferSlot>,
+    pub time_buffer_slot: Arc<TimeBufferSlot>,
     pub peak_output: Arc<AtomicF32>,
+    pub playhead_time: Arc<AtomicF32>,
     pub notifier: PollSubNotifier,
-    pub compiler: Arc<crate::script::ScriptCompiler>,
+    pub compiler: Arc<ScriptCompiler>,
     /// Script editor content — persists between editor opens.
     pub script_content: text_editor::Content,
 }
@@ -192,6 +199,7 @@ pub struct OscillaGui {
     status_message: String,
     compile_ok: bool,
     peak_output_db: f32,
+    playhead_time: f32,
 }
 
 impl OscillaGui {
@@ -211,6 +219,7 @@ impl OscillaGui {
             status_message: String::from("Ready"),
             compile_ok: true,
             peak_output_db: util::MINUS_INFINITY_DB,
+            playhead_time: 0.0,
         }
     }
 
@@ -235,13 +244,14 @@ impl OscillaGui {
             Message::Poll => {
                 self.peak_output_db =
                     util::gain_to_db(self.editor_state.peak_output.load(Ordering::Relaxed));
+                self.playhead_time = self.editor_state.playhead_time.load(Ordering::Relaxed);
             }
             Message::EditorAction(a) => self.editor_state.script_content.perform(a),
             Message::CompileScript => {
                 let src = self.editor_state.script_content.text();
                 let mode = match self.editor_state.params.script_mode.modulated_plain_value() {
-                    0 => crate::script::ScriptMode::Wavetable,
-                    _ => crate::script::ScriptMode::TimeBased,
+                    0 => ScriptMode::Wavetable,
+                    _ => ScriptMode::TimeBased,
                 };
                 let comp = self.editor_state.compiler.clone();
                 self.status_message = String::from("Compiling...");
@@ -315,7 +325,7 @@ impl OscillaGui {
         }
     }
 
-    pub fn view(&self) -> iced::Element<'_, Message> {
+    pub fn view(&self) -> Element<'_, Message> {
         let p = &self.editor_state.params;
 
         /// A knob unit: label → knob → numeric value.
@@ -324,21 +334,18 @@ impl OscillaGui {
             value: String,
             param: &'a FloatParam,
             gesture: fn(Gesture) -> Message,
-        ) -> iced::widget::Column<'a, Message> {
-            let ip = iced_audio::param::nice_to_iced(param);
+        ) -> Column<'a, Message> {
+            let ip = nice_to_iced(param);
             column![
                 knob_label(label),
-                iced_audio::Knob::new(ip).on_gesture(gesture),
+                Knob::new(ip).on_gesture(gesture),
                 value_label(value)
             ]
             .spacing(3)
             .align_x(Center)
         }
 
-        fn section<'a>(
-            label: &'a str,
-            kids: iced::widget::Row<'a, Message>,
-        ) -> iced::widget::Container<'a, Message> {
+        fn section<'a>(label: &'a str, kids: Row<'a, Message>) -> Container<'a, Message> {
             container(column![heading(label), kids].spacing(10))
                 .style(|_| section_panel())
                 .padding(12)
@@ -350,16 +357,22 @@ impl OscillaGui {
             .placeholder("Enter expression...")
             .on_action(Message::EditorAction)
             .font(Font::MONOSPACE)
-            .size(iced::Pixels(13.0))
+            .size(Pixels(13.0))
             .height(Length::Fill)
             .padding(8)
             .key_binding(|key_press| {
-                if key_press.key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)
-                    && key_press
-                        .modifiers
-                        .contains(iced::keyboard::Modifiers::CTRL)
+                if key_press.key == Key::Named(KeyNamed::Enter)
+                    && key_press.modifiers.contains(Modifiers::CTRL)
                 {
                     Some(text_editor::Binding::Custom(Message::CompileScript))
+                } else if key_press.key == Key::Named(KeyNamed::Tab)
+                    && !key_press.modifiers.contains(Modifiers::SHIFT)
+                {
+                    Some(text_editor::Binding::Custom(Message::EditorAction(
+                        text_editor::Action::Edit(text_editor::Edit::Paste(Arc::new(
+                            "  ".to_string(),
+                        ))),
+                    )))
                 } else {
                     text_editor::Binding::from_key_press(key_press)
                 }
@@ -438,6 +451,7 @@ impl OscillaGui {
             time_buffer: self.editor_state.time_buffer_slot.load(),
             mode,
             accent: ACCENT,
+            playhead_time: self.playhead_time,
         })
         .width(Length::Fill)
         .height(Length::Fixed(100.0));
@@ -481,9 +495,9 @@ impl OscillaGui {
 
         // ── Filter ─────────────────────────────────────────────────
         let ft = match p.filter_type.modulated_plain_value() {
-            0 => crate::dsp::filter::FilterType::LowPass,
-            1 => crate::dsp::filter::FilterType::HighPass,
-            _ => crate::dsp::filter::FilterType::BandPass,
+            0 => FilterType::LowPass,
+            1 => FilterType::HighPass,
+            _ => FilterType::BandPass,
         };
         let freq = p.filter_cutoff.modulated_plain_value();
         let freq_str = if freq >= 1000.0 {
@@ -511,9 +525,9 @@ impl OscillaGui {
                     knob_label("Type"),
                     pick_list(
                         &[
-                            crate::dsp::filter::FilterType::LowPass,
-                            crate::dsp::filter::FilterType::HighPass,
-                            crate::dsp::filter::FilterType::BandPass
+                            FilterType::LowPass,
+                            FilterType::HighPass,
+                            FilterType::BandPass
                         ][..],
                         Some(ft),
                         Message::FilterTypeChanged,
@@ -588,7 +602,7 @@ impl OscillaGui {
                     weight: font::Weight::Bold,
                     ..Font::MONOSPACE
                 }),
-            iced::widget::Space::new().width(Length::Fill),
+            Space::new().width(Length::Fill),
             peak_text(peak),
         ])
         .style(|_| section_panel())
@@ -634,10 +648,11 @@ impl OscillaGui {
 // ── Waveform preview canvas ───────────────────────────────────────────
 
 struct WaveformPreview {
-    wavetable: crate::wavetable::SharedWavetable,
-    time_buffer: crate::wavetable::SharedTimeBuffer,
+    wavetable: SharedWavetable,
+    time_buffer: SharedTimeBuffer,
     mode: ScriptMode,
     accent: Color,
+    playhead_time: f32,
 }
 
 impl Program<Message> for WaveformPreview {
@@ -646,10 +661,10 @@ impl Program<Message> for WaveformPreview {
     fn draw(
         &self,
         _state: &Self::State,
-        renderer: &iced::Renderer,
+        renderer: &Renderer,
         _theme: &Theme,
-        bounds: iced::Rectangle,
-        _cursor: iced::mouse::Cursor,
+        bounds: Rectangle,
+        _cursor: Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
         let (w, h, mid) = (bounds.width, bounds.height, bounds.height / 2.0);
@@ -659,21 +674,17 @@ impl Program<Message> for WaveformPreview {
         let (sx, sy) = (w / 8.0, h / 6.0);
         let mut x = 0.0;
         while x <= w {
-            frame.fill_rectangle(iced::Point::new(x, 0.0), iced::Size::new(0.5, h), grid);
+            frame.fill_rectangle(Point::new(x, 0.0), Size::new(0.5, h), grid);
             x += sx;
         }
         let mut y = 0.0;
         while y <= h {
-            frame.fill_rectangle(iced::Point::new(0.0, y), iced::Size::new(w, 0.5), grid);
+            frame.fill_rectangle(Point::new(0.0, y), Size::new(w, 0.5), grid);
             y += sy;
         }
 
         // Accent center line.
-        frame.fill_rectangle(
-            iced::Point::new(0.0, mid - 0.5),
-            iced::Size::new(w, 1.0),
-            ACCENT_LINE,
-        );
+        frame.fill_rectangle(Point::new(0.0, mid - 0.5), Size::new(w, 1.0), ACCENT_LINE);
 
         // Waveform path.
         let mut builder = canvas::path::Builder::new();
@@ -688,10 +699,10 @@ impl Program<Message> for WaveformPreview {
                     let px = (i / data.len() as f32) * w;
                     let py = mid - s * mid * 0.80;
                     if first {
-                        builder.move_to(iced::Point::new(px, py));
+                        builder.move_to(Point::new(px, py));
                         first = false;
                     } else {
-                        builder.line_to(iced::Point::new(px, py));
+                        builder.line_to(Point::new(px, py));
                     }
                     i += step;
                 }
@@ -705,10 +716,10 @@ impl Program<Message> for WaveformPreview {
                         let px = (i / data.len() as f32) * w;
                         let py = mid - s * mid * 0.80;
                         if first {
-                            builder.move_to(iced::Point::new(px, py));
+                            builder.move_to(Point::new(px, py));
                             first = false;
                         } else {
-                            builder.line_to(iced::Point::new(px, py));
+                            builder.line_to(Point::new(px, py));
                         }
                         i += step;
                     }
@@ -731,6 +742,14 @@ impl Program<Message> for WaveformPreview {
                 .with_color(self.accent)
                 .with_width(1.5),
         );
+
+        // ── Playhead bar (time-based mode only) ─────────────────
+        if self.mode == ScriptMode::TimeBased && self.playhead_time > 0.0 {
+            let t = self.playhead_time;
+            let duration = TIME_BUFFER_DURATION;
+            let px = ((t / duration).clamp(0.0, 1.0)) * w;
+            frame.fill_rectangle(Point::new(px - 0.5, 0.0), Size::new(1.0, h), self.accent);
+        }
 
         vec![frame.into_geometry()]
     }
