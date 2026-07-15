@@ -29,8 +29,9 @@
 //! - `sin(t * pi * 2 * 220) * exp(-t * 3)` — percussive pluck
 //!
 
-use rhai::INT;
-use rhai::{AST, Array, Engine, Scope};
+use rayon::prelude::*;
+use rhai::{AST, Dynamic, Engine, Module, Scope};
+use rhai::{Array, INT};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -121,13 +122,20 @@ fn lerp(values: Array, t: f32) -> f32 {
     let index = pos.floor() as usize;
     let frac = pos - index as f32;
 
+    let get = |v: &Dynamic| -> f32 {
+        v.clone()
+            .try_cast::<f32>()
+            .or_else(|| v.clone().try_cast::<f64>().map(|f| f as f32))
+            .or_else(|| v.clone().try_cast::<INT>().map(|i| i as f32))
+            .unwrap_or(0.0)
+    };
+
     if index >= values.len() - 1 {
-        return values[index].clone().try_cast::<f32>().unwrap_or(0.0);
+        return get(&values[index]);
     }
 
-    let a = values[index].clone().try_cast::<f32>().unwrap_or(0.0);
-
-    let b = values[index + 1].clone().try_cast::<f32>().unwrap_or(0.0);
+    let a = get(&values[index]);
+    let b = get(&values[index + 1]);
 
     a + (b - a) * frac
 }
@@ -304,6 +312,14 @@ impl ScriptEngine {
             },
         );
 
+        let mut math = Module::new();
+
+        math.set_var("pi", std::f32::consts::PI);
+        math.set_var("tau", std::f32::consts::TAU);
+        math.set_var("e", std::f32::consts::E);
+
+        engine.register_global_module(Arc::new(math));
+
         let ast = engine
             .compile(source)
             .map_err(|e| format!("Compilation error: {e}"))?;
@@ -320,11 +336,6 @@ impl ScriptEngine {
         let mut scope = Scope::new();
         scope.push("x", x);
         scope.push("t", t);
-
-        // Convenience constants.
-        scope.push_constant("pi", std::f32::consts::PI);
-        scope.push_constant("tau", 2.0_f32 * std::f32::consts::PI);
-        scope.push_constant("e", std::f32::consts::E);
 
         let dyn_val = self
             .engine
@@ -356,7 +367,9 @@ impl ScriptEngine {
 /// The actual compilation and wavetable/time-buffer generation is done
 /// on a background thread, never on the audio callback.
 pub struct ScriptCompiler {
-    engine: Mutex<Option<ScriptEngine>>,
+    engine: Mutex<Option<Arc<ScriptEngine>>>,
+    /// Last compilation or buffer-generation error, for GUI display.
+    last_error: Mutex<Option<String>>,
 }
 
 impl Default for ScriptCompiler {
@@ -369,6 +382,7 @@ impl ScriptCompiler {
     pub fn new() -> Self {
         Self {
             engine: Mutex::new(None),
+            last_error: Mutex::new(None),
         }
     }
 
@@ -378,11 +392,25 @@ impl ScriptCompiler {
         guard.as_ref().map(|e| e.mode)
     }
 
+    /// Store an error message for the GUI to pick up.
+    pub fn store_error(&self, msg: String) {
+        *self.last_error.lock().unwrap() = Some(msg);
+    }
+
+    /// Take and clear the last error message, if any.
+    pub fn take_last_error(&self) -> Option<String> {
+        self.last_error.lock().unwrap().take()
+    }
+
     /// Compile a script and store the engine. Returns Ok on success.
+    /// On success clears any stored error.
     pub fn compile(&self, source: &str, mode: ScriptMode) -> Result<(), String> {
         let engine = ScriptEngine::compile(source, mode)?;
         let mut guard = self.engine.lock().unwrap();
-        *guard = Some(engine);
+        *guard = Some(Arc::new(engine));
+        drop(guard);
+        // Clear any stale error on successful compile.
+        self.last_error.lock().unwrap().take();
         Ok(())
     }
 
@@ -401,35 +429,37 @@ impl ScriptCompiler {
         &self,
         t: f32,
     ) -> Result<crate::wavetable::SharedWavetable, String> {
-        let guard = self.engine.lock().unwrap();
-        let engine = guard.as_ref().ok_or("No script compiled")?;
+        let engine_arc = {
+            let guard = self.engine.lock().unwrap();
+            guard.as_ref().ok_or("No script compiled")?.clone()
+        };
 
-        // Evaluate all 2048 samples, collecting any errors.
+        let inv_n = 1.0 / crate::wavetable::WAVETABLE_SIZE as f32;
+        let mut scope = Scope::new();
         let mut first_err: Option<String> = None;
-        let samples: Vec<f32> = (0..crate::wavetable::WAVETABLE_SIZE)
-            .map(|i| {
-                let x = (i as f32 / crate::wavetable::WAVETABLE_SIZE as f32)
-                    * 2.0
-                    * std::f32::consts::PI;
-                match engine.evaluate(x, t) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        if first_err.is_none() {
-                            first_err = Some(e);
-                        }
-                        0.0
+        let mut data = Box::new([0.0f32; crate::wavetable::WAVETABLE_SIZE]);
+
+        for (i, sample) in data.iter_mut().enumerate() {
+            let x = i as f32 * inv_n * 2.0 * std::f32::consts::PI;
+            scope.set_or_push("x", x);
+            scope.set_or_push("t", t);
+            *sample = match engine_arc
+                .engine
+                .eval_ast_with_scope::<Dynamic>(&mut scope, &engine_arc.ast)
+            {
+                Ok(v) => Self::dynamic_to_f32(v),
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e.to_string());
                     }
+                    0.0
                 }
-            })
-            .collect();
+            };
+        }
 
         if let Some(err) = first_err {
             return Err(format!("Evaluation error: {err}"));
         }
-
-        // Build wavetable from pre-evaluated samples.
-        let mut data = Box::new([0.0f32; crate::wavetable::WAVETABLE_SIZE]);
-        data.copy_from_slice(&samples);
 
         crate::wavetable::remove_dc(&mut data);
         crate::wavetable::normalize(&mut data);
@@ -441,8 +471,23 @@ impl ScriptCompiler {
 
     // Time-buffer generation
 
+    /// Extract an f32 from a Rhai Dynamic value without allocating a Result.
+    #[inline]
+    fn dynamic_to_f32(v: Dynamic) -> f32 {
+        if let Some(f) = v.clone().try_cast::<f32>() {
+            return f;
+        }
+        if let Some(f) = v.clone().try_cast::<f64>() {
+            return f as f32;
+        }
+        if let Some(i) = v.clone().try_cast::<INT>() {
+            return i as f32;
+        }
+        0.0
+    }
+
     /// Generate a time-domain buffer by evaluating the script at regular
-    /// time intervals.
+    /// time intervals, using parallel evaluation for speed.
     ///
     /// The buffer represents `buf_duration_secs` of audio at `sample_rate`.
     /// During playback each voice reads from this buffer with its read
@@ -453,27 +498,50 @@ impl ScriptCompiler {
         sample_rate: f32,
         buf_duration_secs: f32,
     ) -> Result<crate::wavetable::SharedTimeBuffer, String> {
-        let guard = self.engine.lock().unwrap();
-        let engine = guard.as_ref().ok_or("No script compiled")?;
+        let engine_arc = {
+            let guard = self.engine.lock().unwrap();
+            guard.as_ref().ok_or("No script compiled")?.clone()
+        };
 
         let len = (sample_rate * buf_duration_secs) as usize;
-        let mut data = Vec::with_capacity(len);
+        let inv_sr = 1.0 / sample_rate;
+        let mut data: Vec<f32> = vec![0.0; len];
 
-        let mut first_err: Option<String> = None;
-        for i in 0..len {
-            let t = i as f32 / sample_rate;
-            match engine.evaluate(0.0, t) {
-                Ok(v) => data.push(v.clamp(-4.0, 4.0)),
-                Err(e) => {
-                    if first_err.is_none() {
-                        first_err = Some(e);
-                    }
-                    data.push(0.0);
+        // Chunk size balances parallelism overhead against cache efficiency.
+        let num_threads = rayon::current_num_threads();
+        let chunk_size = len.div_ceil(num_threads).max(4096);
+
+        let first_err: Mutex<Option<String>> = Mutex::new(None);
+
+        data.par_chunks_mut(chunk_size)
+            .enumerate()
+            .for_each(|(chunk_idx, chunk)| {
+                let base = chunk_idx * chunk_size;
+                let mut scope = Scope::new();
+
+                for (j, sample) in chunk.iter_mut().enumerate() {
+                    let t = (base + j) as f32 * inv_sr;
+
+                    scope.set_or_push("x", 0.0_f32);
+                    scope.set_or_push("t", t);
+
+                    *sample = match engine_arc
+                        .engine
+                        .eval_ast_with_scope::<Dynamic>(&mut scope, &engine_arc.ast)
+                    {
+                        Ok(v) => Self::dynamic_to_f32(v).clamp(-4.0, 4.0),
+                        Err(e) => {
+                            let mut guard = first_err.lock().unwrap();
+                            if guard.is_none() {
+                                *guard = Some(e.to_string());
+                            }
+                            0.0
+                        }
+                    };
                 }
-            }
-        }
+            });
 
-        if let Some(err) = first_err {
+        if let Some(err) = first_err.into_inner().unwrap() {
             return Err(format!("Evaluation error: {err}"));
         }
 
@@ -536,7 +604,7 @@ mod tests {
 
     #[test]
     fn test_int_multiplier_in_argument() {
-        let v = eval("sin(x*3)");
+        let v = eval("sin(x * 3)");
         assert!(v.is_finite(), "sin(x*3) must be finite, got {v}");
     }
 
@@ -560,13 +628,13 @@ mod tests {
 
     #[test]
     fn test_complex_patch() {
-        let v = eval("sin(x) + sin(x*3)*0.25");
+        let v = eval("sin(x) + sin(x * 3) * 0.25");
         assert!(v.is_finite(), "complex patch must be finite, got {v}");
     }
 
     #[test]
     fn test_tanh_saw_noise() {
-        let v = eval("tanh(saw(x)+noise(x)*0.05)");
+        let v = eval("tanh(saw(x) + noise(x) * 0.05)");
         assert!(v.is_finite(), "tanh patch must be finite, got {v}");
     }
 

@@ -8,23 +8,47 @@ use crate::script::{ScriptCompiler, ScriptMode};
 use crate::wavetable::{SharedTimeBuffer, SharedWavetable};
 use iced_audio::param::nice_to_iced;
 use iced_audio::{Gesture, Knob};
+use iced_code_editor::CodeEditor;
 use nice_plug::prelude::*;
 use nice_plug_iced::iced::{
-    Background, Border, Center, Color, Element, Font, Length, Pixels, Point, PollSubNotifier,
-    Rectangle, Renderer, Shadow, Size, Theme, Vector, border, font,
-    keyboard::key::Named as KeyNamed,
-    keyboard::{Key, Modifiers},
+    Background, Border, Center, Color, Element, Font, Length, Point, PollSubNotifier, Rectangle,
+    Renderer, Shadow, Size, Theme, Vector, border, font,
     mouse::Cursor,
     theme::Palette,
     widget::{
         Column, Container, Row, Space, button,
         canvas::{self, Canvas, Frame, Geometry, Program},
-        column, container, pick_list, row, text, text_editor,
+        column, container, pick_list, row, text,
     },
 };
 use nice_plug_iced::{EditorState, NiceGuiContext};
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+
+/// Thread-safe handle for `CodeEditor`.
+///
+/// `CodeEditor` contains `Rc` and is `!Send`, but the editor is only ever
+/// accessed from the GUI thread. This wrapper provides an `unsafe impl Send`
+/// so it can be stored in `EditorState<T: Send>`.
+pub struct EditorHandle(pub CodeEditor);
+
+// SAFETY: EditorHandle is only ever accessed on the GUI thread.
+unsafe impl Send for EditorHandle {}
+unsafe impl Sync for EditorHandle {}
+
+impl Deref for EditorHandle {
+    type Target = CodeEditor;
+    fn deref(&self) -> &CodeEditor {
+        &self.0
+    }
+}
+
+impl DerefMut for EditorHandle {
+    fn deref_mut(&mut self) -> &mut CodeEditor {
+        &mut self.0
+    }
+}
 
 // Palette
 
@@ -158,7 +182,7 @@ fn picklist_style() -> pick_list::Style {
 #[derive(Debug, Clone)]
 pub enum Message {
     Poll,
-    EditorAction(text_editor::Action),
+    EditorEvent(iced_code_editor::Message),
     CompileScript,
 
     VolumeGestured(Gesture),
@@ -188,7 +212,7 @@ pub struct OscillaEditorState {
     pub compiler: Arc<ScriptCompiler>,
     pub sample_rate: Arc<AtomicF32>,
     pub async_executor: Arc<dyn Fn(OscillaTask) + Send + Sync>,
-    pub script_content: text_editor::Content,
+    pub script_content: EditorHandle,
 }
 
 // Application
@@ -211,8 +235,8 @@ impl OscillaGui {
         // DAW restores params AFTER editor() creates OscillaEditorState,
         // so script_content may still be the default. Sync it now.
         let saved = editor_state.params.wave_script.borrow().clone();
-        if editor_state.script_content.text() != saved {
-            editor_state.script_content = text_editor::Content::with_text(&saved);
+        if editor_state.script_content.content() != saved {
+            let _ = editor_state.script_content.reset(&saved);
         }
         Self {
             editor_state,
@@ -245,19 +269,30 @@ impl OscillaGui {
             Message::Poll => {
                 self.peak_output_db =
                     util::gain_to_db(self.editor_state.peak_output.load(Ordering::Relaxed));
-                if self.compile_pending && self.editor_state.compiler.current_mode().is_some() {
+                // Always check for errors (from background task or audio thread).
+                if let Some(err) = self.editor_state.compiler.take_last_error() {
+                    self.compile_pending = false;
+                    self.compile_ok = false;
+                    self.status_message = err;
+                } else if self.compile_pending
+                    && self.editor_state.compiler.current_mode().is_some()
+                {
                     self.compile_pending = false;
                     self.status_message = String::from("Compiled");
                 }
             }
-            Message::EditorAction(a) => self.editor_state.script_content.perform(a),
+            Message::EditorEvent(event) => {
+                let _ = CodeEditor::update(&mut self.editor_state.script_content, &event);
+            }
             Message::CompileScript => {
-                let src = self.editor_state.script_content.text();
+                let src = self.editor_state.script_content.content();
                 let mode = match self.editor_state.params.script_mode.modulated_plain_value() {
                     0 => ScriptMode::Wavetable,
                     _ => ScriptMode::TimeBased,
                 };
                 *self.editor_state.params.wave_script.borrow_mut() = src.clone();
+                // Clear any stale error before kicking off new compilation.
+                self.editor_state.compiler.take_last_error();
                 self.status_message = String::from("Compiling...");
                 self.compile_ok = true;
                 self.compile_pending = true;
@@ -334,43 +369,24 @@ impl OscillaGui {
                 .width(Length::Fill)
         }
 
-        // Script editor
-        let editor = text_editor(&self.editor_state.script_content)
-            .placeholder("Enter expression...")
-            .on_action(Message::EditorAction)
-            .font(Font::MONOSPACE)
-            .size(Pixels(13.0))
-            .height(Length::Fill)
-            .padding(8)
-            .key_binding(|key_press| {
-                if key_press.key == Key::Named(KeyNamed::Enter)
-                    && key_press.modifiers.contains(Modifiers::CTRL)
-                {
-                    Some(text_editor::Binding::Custom(Message::CompileScript))
-                } else if key_press.key == Key::Named(KeyNamed::Tab)
-                    && !key_press.modifiers.contains(Modifiers::SHIFT)
-                {
-                    Some(text_editor::Binding::Custom(Message::EditorAction(
-                        text_editor::Action::Edit(text_editor::Edit::Paste(Arc::new(
-                            "  ".to_string(),
-                        ))),
-                    )))
-                } else {
-                    text_editor::Binding::from_key_press(key_press)
-                }
-            })
-            .style(|_theme, _status| text_editor::Style {
-                background: Background::Color(BG_DEEP),
+        // Script editor — canvas-based code editor with syntax highlighting.
+        let editor: Element<'_, Message> = self
+            .editor_state
+            .script_content
+            .view()
+            .map(Message::EditorEvent);
+
+        let editor_container = container(editor)
+            .style(|_| container::Style {
+                background: Some(Background::Color(BG_DEEP)),
                 border: Border {
                     color: BORDER,
                     width: 1.0,
                     radius: rad(3.0),
                 },
-                placeholder: FG_DIM,
-                selection: Color::from_rgba(0.0, 0.478, 0.8, 0.3),
-                value: FG_TEXT,
+                ..Default::default()
             })
-            .highlight("Rust", iced_highlighter::Theme::Base16Ocean);
+            .height(Length::Fill);
 
         let ok = if self.compile_ok { GREEN } else { RED };
 
@@ -415,7 +431,7 @@ impl OscillaGui {
             column![
                 heading("SCRIPT"),
                 mode_column,
-                editor,
+                editor_container,
                 row![compile_btn, status_text(&self.status_message, ok),]
                     .spacing(12)
                     .align_y(Center),

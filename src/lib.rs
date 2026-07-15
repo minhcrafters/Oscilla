@@ -12,12 +12,13 @@ pub mod wavetable;
 
 use crate::dsp::filter::FilterType;
 use crate::dsp::{SynthEngine, TimeBufferSlot, WavetableSlot};
+use crate::gui::EditorHandle;
 use crate::script::{ScriptCompiler, ScriptMode};
 use crate::wavetable::{default_time_buffer, default_wavetable};
 use atomic_refcell::AtomicRefCell;
+use iced_code_editor::CodeEditor;
 use nice_plug::prelude::*;
 use nice_plug_iced::iced::PollSubNotifier;
-use nice_plug_iced::iced::widget::text_editor;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -309,10 +310,18 @@ impl Plugin for Oscilla {
                             }
                             notifier.notify();
                         }
-                        Err(e) => log::error!("Oscilla: buffer generation: {e}"),
+                        Err(e) => {
+                            log::error!("Oscilla: buffer generation: {e}");
+                            compiler.store_error(e);
+                            notifier.notify();
+                        }
                     }
                 }
-                Err(e) => log::error!("Oscilla: script compile: {e}"),
+                Err(e) => {
+                    log::error!("Oscilla: script compile: {e}");
+                    compiler.store_error(e);
+                    notifier.notify();
+                }
             },
         })
     }
@@ -330,7 +339,7 @@ impl Plugin for Oscilla {
             compiler: self.compiler.clone(),
             sample_rate: self.sample_rate.clone(),
             async_executor: executor,
-            script_content: text_editor::Content::with_text(&initial_text),
+            script_content: EditorHandle(CodeEditor::new(&initial_text, "")),
         };
 
         nice_plug_iced::create_iced_editor(
@@ -387,17 +396,26 @@ impl Plugin for Oscilla {
         if script != self.last_compiled {
             if let Err(e) = self.compiler.compile(&script, mode) {
                 log::error!("Oscilla: init compile error: {e}");
-            } else if let Ok((wt_opt, tb_opt)) = self
-                .compiler
-                .generate_both(mode, self.sample_rate.load(Ordering::Relaxed))
-            {
-                if let Some(wt) = wt_opt {
-                    self.wavetable_slot.store(wt);
+                self.compiler.store_error(e);
+            } else {
+                match self
+                    .compiler
+                    .generate_both(mode, self.sample_rate.load(Ordering::Relaxed))
+                {
+                    Ok((wt_opt, tb_opt)) => {
+                        if let Some(wt) = wt_opt {
+                            self.wavetable_slot.store(wt);
+                        }
+                        if let Some(tb) = tb_opt {
+                            self.time_buffer_slot.store(tb);
+                        }
+                        self.last_compiled = script;
+                    }
+                    Err(e) => {
+                        log::error!("Oscilla: init buffer generation: {e}");
+                        self.compiler.store_error(e);
+                    }
                 }
-                if let Some(tb) = tb_opt {
-                    self.time_buffer_slot.store(tb);
-                }
-                self.last_compiled = script;
             }
             table = self.wavetable_slot.load();
             time_buf = self.time_buffer_slot.load();
