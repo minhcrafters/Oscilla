@@ -496,7 +496,7 @@ impl OscillaGui {
                     Message::ResonanceGestured
                 ),
                 column![
-                    heading("Type"),
+                    knob_label("Type"),
                     pick_list(
                         &[
                             crate::dsp::filter::FilterType::LowPass,
@@ -510,7 +510,7 @@ impl OscillaGui {
                     .padding([6, 12])
                     .style(|_theme, _status| picklist_style()),
                 ]
-                .spacing(6)
+                .spacing(3)
                 .align_x(Center),
             ]
             .spacing(14),
