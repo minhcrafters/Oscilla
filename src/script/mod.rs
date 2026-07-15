@@ -29,14 +29,15 @@
 //! - `sin(t * pi * 2 * 220) * exp(-t * 3)` — percussive pluck
 //!
 
-use rhai::{AST, Engine, INT, Scope};
+use rhai::INT;
+use rhai::{AST, Array, Engine, Scope};
 use std::sync::Arc;
 use std::sync::Mutex;
 
 /// Which variable the script is a function of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptMode {
-    /// Script uses `x` (phase 0..2π); output is a single-cycle wavetable.
+    /// Script uses `x` (phase 0..2pi); output is a single-cycle wavetable.
     Wavetable,
     /// Script uses `t` (seconds since note-on); output is a time-domain buffer.
     TimeBased,
@@ -59,7 +60,7 @@ fn phase_noise(x: f32) -> f32 {
     n * 2.0 - 1.0
 }
 
-/// Sawtooth wave: maps phase 0..2π to -1..1.
+/// Sawtooth wave: maps phase 0..2pi to -1..1.
 fn saw(x: f32) -> f32 {
     let t = x / (2.0 * std::f32::consts::PI);
     2.0 * (t - (t + 0.5).floor())
@@ -107,6 +108,28 @@ fn fold(x: f32, threshold: f32) -> f32 {
 /// Hard clipping.
 fn clip(x: f32, level: f32) -> f32 {
     x.clamp(-level, level)
+}
+
+/// Linear interpolation between values.
+fn lerp(values: Array, t: f32) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+
+    let pos = t.clamp(0.0, 1.0) * (values.len() - 1) as f32;
+
+    let index = pos.floor() as usize;
+    let frac = pos - index as f32;
+
+    if index >= values.len() - 1 {
+        return values[index].clone().try_cast::<f32>().unwrap_or(0.0);
+    }
+
+    let a = values[index].clone().try_cast::<f32>().unwrap_or(0.0);
+
+    let b = values[index + 1].clone().try_cast::<f32>().unwrap_or(0.0);
+
+    a + (b - a) * frac
 }
 
 fn as_f32(v: rhai::Dynamic) -> Result<f32, Box<rhai::EvalAltResult>> {
@@ -203,6 +226,15 @@ impl ScriptEngine {
             },
         );
 
+        engine.register_fn(
+            "lerp",
+            |values: rhai::Array,
+             t: rhai::Dynamic|
+             -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
+                Ok(rhai::Dynamic::from(lerp(values, as_f32(t)?)))
+            },
+        );
+
         // Core math
         macro_rules! reg_math {
             ($name:expr, $func:expr) => {
@@ -288,6 +320,7 @@ impl ScriptEngine {
         let mut scope = Scope::new();
         scope.push("x", x);
         scope.push("t", t);
+
         // Convenience constants.
         scope.push_constant("pi", std::f32::consts::PI);
         scope.push_constant("tau", 2.0_f32 * std::f32::consts::PI);
