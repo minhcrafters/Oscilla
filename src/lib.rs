@@ -314,10 +314,8 @@ impl Plugin for Oscilla {
         })
     }
 
-    fn editor(&mut self, async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         let initial_text = self.params.wave_script.borrow().clone();
-        let executor: Arc<dyn Fn(OscillaTask) + Send + Sync> =
-            Arc::new(move |task| async_executor.execute_background(task));
         let editor_state = gui::OscillaEditorState {
             params: self.params.clone(),
             wavetable_slot: self.wavetable_slot.clone(),
@@ -326,7 +324,6 @@ impl Plugin for Oscilla {
             notifier: self.notifier.clone(),
             compiler: self.compiler.clone(),
             sample_rate: self.sample_rate,
-            async_executor: executor,
             script_content: text_editor::Content::with_text(&initial_text),
         };
 

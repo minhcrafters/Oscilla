@@ -1,7 +1,6 @@
 //! Iced GUI for Oscilla — VS Code Dark IDE theme.
 
 use crate::OscillaParams;
-use crate::OscillaTask;
 use crate::dsp::filter::FilterType;
 use crate::dsp::{TimeBufferSlot, WavetableSlot};
 use crate::script::{ScriptCompiler, ScriptMode};
@@ -187,7 +186,6 @@ pub struct OscillaEditorState {
     pub notifier: PollSubNotifier,
     pub compiler: Arc<ScriptCompiler>,
     pub sample_rate: f32,
-    pub async_executor: Arc<dyn Fn(OscillaTask) + Send + Sync>,
     pub script_content: text_editor::Content,
 }
 
@@ -200,7 +198,6 @@ pub struct OscillaGui {
     status_message: String,
     compile_ok: bool,
     peak_output_db: f32,
-    compile_pending: bool,
 }
 
 impl OscillaGui {
@@ -220,7 +217,6 @@ impl OscillaGui {
             status_message: String::from("Ready"),
             compile_ok: true,
             peak_output_db: util::MINUS_INFINITY_DB,
-            compile_pending: false,
         }
     }
 
@@ -245,10 +241,6 @@ impl OscillaGui {
             Message::Poll => {
                 self.peak_output_db =
                     util::gain_to_db(self.editor_state.peak_output.load(Ordering::Relaxed));
-                if self.compile_pending && self.editor_state.compiler.current_mode().is_some() {
-                    self.compile_pending = false;
-                    self.status_message = String::from("Compiled");
-                }
             }
             Message::EditorAction(a) => self.editor_state.script_content.perform(a),
             Message::CompileScript => {
@@ -257,14 +249,35 @@ impl OscillaGui {
                     0 => ScriptMode::Wavetable,
                     _ => ScriptMode::TimeBased,
                 };
-                *self.editor_state.params.wave_script.borrow_mut() = src.clone();
+                let comp = self.editor_state.compiler.clone();
                 self.status_message = String::from("Compiling...");
                 self.compile_ok = true;
-                self.compile_pending = true;
-                (self.editor_state.async_executor)(OscillaTask::CompileScript {
-                    source: src,
-                    mode,
-                });
+                match comp.compile(&src, mode) {
+                    Ok(()) => {
+                        let sr = self.editor_state.sample_rate;
+                        match comp.generate_both(mode, sr) {
+                            Ok((wt_opt, tb_opt)) => {
+                                if let Some(wt) = wt_opt {
+                                    self.editor_state.wavetable_slot.store(wt);
+                                }
+                                if let Some(tb) = tb_opt {
+                                    self.editor_state.time_buffer_slot.store(tb);
+                                }
+                                *self.editor_state.params.wave_script.borrow_mut() =
+                                    self.editor_state.script_content.text();
+                                self.status_message = String::from("Compiled");
+                            }
+                            Err(e) => {
+                                self.status_message = format!("Gen error: {e}");
+                                self.compile_ok = false;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.status_message = format!("Error: {e}");
+                        self.compile_ok = false;
+                    }
+                }
             }
             Message::VolumeGestured(g) => iced_audio::param::set_nice_param(&p.volume, g, &setter),
             Message::AttackGestured(g) => iced_audio::param::set_nice_param(&p.attack, g, &setter),
