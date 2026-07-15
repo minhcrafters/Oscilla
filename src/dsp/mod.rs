@@ -247,12 +247,4 @@ impl SynthEngine {
     pub fn active_voice_count(&self) -> usize {
         self.voices.iter().filter(|v| v.active).count()
     }
-
-    pub fn playhead_time(&self) -> f32 {
-        self.voices
-            .iter()
-            .find(|v| v.active)
-            .map(|v| v.time_elapsed)
-            .unwrap_or(0.0)
-    }
 }

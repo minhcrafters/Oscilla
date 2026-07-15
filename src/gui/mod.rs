@@ -1,10 +1,11 @@
 //! Iced GUI for Oscilla — VS Code Dark IDE theme.
 
 use crate::OscillaParams;
+use crate::OscillaTask;
 use crate::dsp::filter::FilterType;
 use crate::dsp::{TimeBufferSlot, WavetableSlot};
 use crate::script::{ScriptCompiler, ScriptMode};
-use crate::wavetable::{SharedTimeBuffer, SharedWavetable, TIME_BUFFER_DURATION};
+use crate::wavetable::{SharedTimeBuffer, SharedWavetable};
 use iced_audio::param::nice_to_iced;
 use iced_audio::{Gesture, Knob};
 use nice_plug::prelude::*;
@@ -183,10 +184,10 @@ pub struct OscillaEditorState {
     pub wavetable_slot: Arc<WavetableSlot>,
     pub time_buffer_slot: Arc<TimeBufferSlot>,
     pub peak_output: Arc<AtomicF32>,
-    pub playhead_time: Arc<AtomicF32>,
     pub notifier: PollSubNotifier,
     pub compiler: Arc<ScriptCompiler>,
-    /// Script editor content — persists between editor opens.
+    pub sample_rate: f32,
+    pub async_executor: Arc<dyn Fn(OscillaTask) + Send + Sync>,
     pub script_content: text_editor::Content,
 }
 
@@ -199,7 +200,7 @@ pub struct OscillaGui {
     status_message: String,
     compile_ok: bool,
     peak_output_db: f32,
-    playhead_time: f32,
+    compile_pending: bool,
 }
 
 impl OscillaGui {
@@ -219,7 +220,7 @@ impl OscillaGui {
             status_message: String::from("Ready"),
             compile_ok: true,
             peak_output_db: util::MINUS_INFINITY_DB,
-            playhead_time: 0.0,
+            compile_pending: false,
         }
     }
 
@@ -244,7 +245,10 @@ impl OscillaGui {
             Message::Poll => {
                 self.peak_output_db =
                     util::gain_to_db(self.editor_state.peak_output.load(Ordering::Relaxed));
-                self.playhead_time = self.editor_state.playhead_time.load(Ordering::Relaxed);
+                if self.compile_pending && self.editor_state.compiler.current_mode().is_some() {
+                    self.compile_pending = false;
+                    self.status_message = String::from("Compiled");
+                }
             }
             Message::EditorAction(a) => self.editor_state.script_content.perform(a),
             Message::CompileScript => {
@@ -253,36 +257,14 @@ impl OscillaGui {
                     0 => ScriptMode::Wavetable,
                     _ => ScriptMode::TimeBased,
                 };
-                let comp = self.editor_state.compiler.clone();
+                *self.editor_state.params.wave_script.borrow_mut() = src.clone();
                 self.status_message = String::from("Compiling...");
                 self.compile_ok = true;
-                match comp.compile(&src, mode) {
-                    Ok(()) => {
-                        let sr = 44100.0; // default; actual sample rate from host isn't available here
-                        match comp.generate_both(mode, sr) {
-                            Ok((wt_opt, tb_opt)) => {
-                                if let Some(wt) = wt_opt {
-                                    self.editor_state.wavetable_slot.store(wt);
-                                }
-                                if let Some(tb) = tb_opt {
-                                    self.editor_state.time_buffer_slot.store(tb);
-                                }
-                                // Persist script to params so DAW saves it.
-                                *self.editor_state.params.wave_script.borrow_mut() =
-                                    self.editor_state.script_content.text();
-                                self.status_message = String::from("Compiled");
-                            }
-                            Err(e) => {
-                                self.status_message = format!("Gen error: {e}");
-                                self.compile_ok = false;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        self.status_message = format!("Error: {e}");
-                        self.compile_ok = false;
-                    }
-                }
+                self.compile_pending = true;
+                (self.editor_state.async_executor)(OscillaTask::CompileScript {
+                    source: src,
+                    mode,
+                });
             }
             Message::VolumeGestured(g) => iced_audio::param::set_nice_param(&p.volume, g, &setter),
             Message::AttackGestured(g) => iced_audio::param::set_nice_param(&p.attack, g, &setter),
@@ -451,7 +433,6 @@ impl OscillaGui {
             time_buffer: self.editor_state.time_buffer_slot.load(),
             mode,
             accent: ACCENT,
-            playhead_time: self.playhead_time,
         })
         .width(Length::Fill)
         .height(Length::Fixed(100.0));
@@ -595,13 +576,17 @@ impl OscillaGui {
             format!("{:.1} dB", self.peak_output_db)
         };
         let footer = container(row![
-            text(format!("Oscilla v{}", env!("CARGO_PKG_VERSION")))
-                .size(11)
-                .color(FG_DIM)
-                .font(Font {
-                    weight: font::Weight::Bold,
-                    ..Font::MONOSPACE
-                }),
+            text(format!(
+                "Oscilla v{}-{}",
+                env!("CARGO_PKG_VERSION"),
+                if cfg!(debug_assertions) { "dev" } else { "rel" }
+            ))
+            .size(11)
+            .color(FG_DIM)
+            .font(Font {
+                weight: font::Weight::Bold,
+                ..Font::MONOSPACE
+            }),
             Space::new().width(Length::Fill),
             peak_text(peak),
         ])
@@ -643,7 +628,6 @@ struct WaveformPreview {
     time_buffer: SharedTimeBuffer,
     mode: ScriptMode,
     accent: Color,
-    playhead_time: f32,
 }
 
 impl Program<Message> for WaveformPreview {
@@ -733,14 +717,6 @@ impl Program<Message> for WaveformPreview {
                 .with_color(self.accent)
                 .with_width(1.5),
         );
-
-        // Playhead bar
-        if self.mode == ScriptMode::TimeBased && self.playhead_time > 0.0 {
-            let t = self.playhead_time;
-            let duration = TIME_BUFFER_DURATION;
-            let px = ((t / duration).clamp(0.0, 1.0)) * w;
-            frame.fill_rectangle(Point::new(px - 0.5, 0.0), Size::new(1.0, h), self.accent);
-        }
 
         vec![frame.into_geometry()]
     }

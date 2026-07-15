@@ -30,7 +30,6 @@ pub struct Oscilla {
     time_buffer_slot: Arc<TimeBufferSlot>,
     compiler: Arc<ScriptCompiler>,
     peak_output: Arc<AtomicF32>,
-    playhead_time: Arc<AtomicF32>,
     notifier: PollSubNotifier,
     sample_rate: f32,
     /// True until the first process() call compiles the saved script.
@@ -58,7 +57,6 @@ impl Default for Oscilla {
             time_buffer_slot: Arc::new(TimeBufferSlot::new(Arc::new(default_time_buf))),
             compiler: Arc::new(ScriptCompiler::new()),
             peak_output: Arc::new(AtomicF32::new(0.0)),
-            playhead_time: Arc::new(AtomicF32::new(0.0)),
             notifier: PollSubNotifier::new(),
             sample_rate,
             needs_init_compile: true,
@@ -317,16 +315,19 @@ impl Plugin for Oscilla {
         })
     }
 
-    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+    fn editor(&mut self, async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         let initial_text = self.params.wave_script.borrow().clone();
+        let executor: Arc<dyn Fn(OscillaTask) + Send + Sync> =
+            Arc::new(move |task| async_executor.execute_background(task));
         let editor_state = gui::OscillaEditorState {
             params: self.params.clone(),
             wavetable_slot: self.wavetable_slot.clone(),
             time_buffer_slot: self.time_buffer_slot.clone(),
             peak_output: self.peak_output.clone(),
-            playhead_time: self.playhead_time.clone(),
             notifier: self.notifier.clone(),
             compiler: self.compiler.clone(),
+            sample_rate: self.sample_rate,
+            async_executor: executor,
             script_content: text_editor::Content::with_text(&initial_text),
         };
 
@@ -367,15 +368,22 @@ impl Plugin for Oscilla {
         _aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        // One-time: compile saved script on first audio callback
+        let mut table = self.wavetable_slot.load();
+        let mut time_buf = self.time_buffer_slot.load();
+        let mut next_event = context.next_event();
+        let mut had_events = false;
+        let mut peak = 0.0f32;
+
+        let mode = match self.params.script_mode.modulated_plain_value() {
+            0 => ScriptMode::Wavetable,
+            _ => ScriptMode::TimeBased,
+        };
+        self.engine.script_mode = mode;
+
         if self.needs_init_compile {
             self.needs_init_compile = false;
             let script = self.params.wave_script.borrow().clone();
             if script != "sin(x)" {
-                let mode = match self.params.script_mode.modulated_plain_value() {
-                    0 => ScriptMode::Wavetable,
-                    _ => ScriptMode::TimeBased,
-                };
                 if let Err(e) = self.compiler.compile(&script, mode) {
                     log::error!("Oscilla: init compile error: {e}");
                 } else if let Ok((wt_opt, tb_opt)) =
@@ -389,20 +397,10 @@ impl Plugin for Oscilla {
                     }
                 }
             }
+            table = self.wavetable_slot.load();
+            time_buf = self.time_buffer_slot.load();
         }
 
-        let table = self.wavetable_slot.load();
-        let time_buf = self.time_buffer_slot.load();
-        let mut next_event = context.next_event();
-        let mut had_events = false;
-        let mut peak = 0.0f32;
-
-        // Per-block parameter update
-        let mode = match self.params.script_mode.modulated_plain_value() {
-            0 => ScriptMode::Wavetable,
-            _ => ScriptMode::TimeBased,
-        };
-        self.engine.script_mode = mode;
         let ft = match self.params.filter_type.modulated_plain_value() {
             0 => FilterType::LowPass,
             1 => FilterType::HighPass,
@@ -474,17 +472,17 @@ impl Plugin for Oscilla {
             let cur = self.peak_output.load(Ordering::Relaxed);
             let new = if peak > cur {
                 peak
+            } else if peak < 0.0001 {
+                // Silence: drop immediately.
+                0.0
             } else {
-                cur * 0.9995 + peak * 0.0005
+                // ~30 dB/s decay — matches typical digital peak ballistics.
+                cur * 0.99 + peak * 0.01
             };
             if (cur - new).abs() > 0.0001 {
                 self.peak_output.store(new, Ordering::Relaxed);
                 self.notifier.notify();
             }
-
-            // Update playhead position for waveform preview scrubber.
-            self.playhead_time
-                .store(self.engine.playhead_time(), Ordering::Relaxed);
         }
 
         ProcessStatus::KeepAlive
