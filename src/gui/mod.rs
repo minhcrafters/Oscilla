@@ -9,6 +9,8 @@ use crate::wavetable::{SharedTimeBuffer, SharedWavetable};
 use iced_audio::param::nice_to_iced;
 use iced_audio::{Gesture, Knob};
 use iced_code_editor::CodeEditor;
+use iced_code_editor::IndentStyle;
+use iced_code_editor::theme;
 use nice_plug::prelude::*;
 use nice_plug_iced::iced::{
     Background, Border, Center, Color, Element, Font, Length, Point, PollSubNotifier, Rectangle,
@@ -50,6 +52,8 @@ impl DerefMut for EditorHandle {
     }
 }
 
+pub mod knob_style;
+
 // Palette
 
 const BG_DEEP: Color = Color::from_rgb(0.118, 0.118, 0.118);
@@ -64,6 +68,20 @@ const FG_TEXT: Color = Color::from_rgb(0.831, 0.831, 0.831);
 const GREEN: Color = Color::from_rgb(0.306, 0.788, 0.690);
 const RED: Color = Color::from_rgb(0.945, 0.298, 0.298);
 const YELLOW: Color = Color::from_rgb(0.875, 0.808, 0.0);
+
+/// VS Code Dark+ theme for the code editor.
+fn vscode_editor_style() -> theme::Style {
+    theme::Style {
+        background: BG_DEEP,
+        text_color: FG_TEXT,
+        gutter_background: BG_DEEP,
+        gutter_border: Color::from_rgb(0.18, 0.18, 0.18),
+        line_number_color: FG_DIM,
+        scrollbar_background: BG_DEEP,
+        scroller_color: Color::from_rgb(0.30, 0.30, 0.30),
+        current_line_highlight: Color::from_rgba(1.0, 1.0, 1.0, 0.04),
+    }
+}
 
 // Typography
 
@@ -215,6 +233,44 @@ pub struct OscillaEditorState {
     pub script_content: EditorHandle,
 }
 
+// --- Knob helpers ---
+
+/// Create a unipolar arc knob: label → knob → value.
+fn arc_knob<'a>(
+    label: &'a str,
+    value: String,
+    param: &'a FloatParam,
+    gesture: fn(Gesture) -> Message,
+) -> Column<'a, Message> {
+    let ip = nice_to_iced(param);
+    column![
+        knob_label(label),
+        Knob::new(ip).on_gesture(gesture).style(knob_style::ArcKnob),
+        value_label(value)
+    ]
+    .spacing(3)
+    .align_x(Center)
+}
+
+/// Create a bipolar arc knob: label → knob → value.
+fn bipolar_knob<'a>(
+    label: &'a str,
+    value: String,
+    param: &'a FloatParam,
+    gesture: fn(Gesture) -> Message,
+) -> Column<'a, Message> {
+    let ip = nice_to_iced(param);
+    column![
+        knob_label(label),
+        Knob::new(ip)
+            .on_gesture(gesture)
+            .style(knob_style::ArcBipolarKnob),
+        value_label(value)
+    ]
+    .spacing(3)
+    .align_x(Center)
+}
+
 // Application
 
 pub struct OscillaGui {
@@ -238,6 +294,20 @@ impl OscillaGui {
         if editor_state.script_content.content() != saved {
             let _ = editor_state.script_content.reset(&saved);
         }
+
+        // Configure the code editor to match VS Code Dark+ theme.
+        editor_state.script_content.set_font(Font::MONOSPACE);
+        editor_state.script_content.set_font_size(13.0, true);
+        editor_state.script_content.set_line_numbers_enabled(false);
+        editor_state
+            .script_content
+            .set_search_replace_enabled(false);
+        editor_state.script_content.set_folding_enabled(false);
+        editor_state.script_content.set_theme(vscode_editor_style());
+        editor_state
+            .script_content
+            .set_indent_style(IndentStyle::Spaces(2));
+
         Self {
             editor_state,
             nice_ctx,
@@ -345,23 +415,6 @@ impl OscillaGui {
     pub fn view(&self) -> Element<'_, Message> {
         let p = &self.editor_state.params;
 
-        /// A knob unit: label → knob → numeric value.
-        fn knob<'a>(
-            label: &'a str,
-            value: String,
-            param: &'a FloatParam,
-            gesture: fn(Gesture) -> Message,
-        ) -> Column<'a, Message> {
-            let ip = nice_to_iced(param);
-            column![
-                knob_label(label),
-                Knob::new(ip).on_gesture(gesture),
-                value_label(value)
-            ]
-            .spacing(3)
-            .align_x(Center)
-        }
-
         fn section<'a>(label: &'a str, kids: Row<'a, Message>) -> Container<'a, Message> {
             container(column![heading(label), kids].spacing(10))
                 .style(|_| section_panel())
@@ -369,7 +422,6 @@ impl OscillaGui {
                 .width(Length::Fill)
         }
 
-        // Script editor — canvas-based code editor with syntax highlighting.
         let editor: Element<'_, Message> = self
             .editor_state
             .script_content
@@ -462,25 +514,25 @@ impl OscillaGui {
         let envelope = section(
             "ENVELOPE",
             row![
-                knob(
+                arc_knob(
                     "Attack",
                     format!("{:.3}", p.attack.modulated_plain_value()),
                     &p.attack,
                     Message::AttackGestured
                 ),
-                knob(
+                arc_knob(
                     "Decay",
                     format!("{:.3}", p.decay.modulated_plain_value()),
                     &p.decay,
                     Message::DecayGestured
                 ),
-                knob(
+                arc_knob(
                     "Sustain",
                     format!("{:.0}%", p.sustain.modulated_plain_value() * 100.0),
                     &p.sustain,
                     Message::SustainGestured
                 ),
-                knob(
+                arc_knob(
                     "Release",
                     format!("{:.3}", p.release.modulated_plain_value()),
                     &p.release,
@@ -506,13 +558,13 @@ impl OscillaGui {
         let filter = section(
             "FILTER",
             row![
-                knob(
+                arc_knob(
                     "Cutoff",
                     freq_str,
                     &p.filter_cutoff,
                     Message::CutoffGestured
                 ),
-                knob(
+                arc_knob(
                     "Res",
                     format!("{:.0}%", p.filter_resonance.modulated_plain_value() * 100.0),
                     &p.filter_resonance,
@@ -543,19 +595,19 @@ impl OscillaGui {
         let unison = section(
             "UNISON",
             row![
-                knob(
+                arc_knob(
                     "Voices",
                     format!("{}", p.unison_voices.modulated_plain_value() as i32),
                     &p.unison_voices,
                     Message::UnisonVoicesGestured
                 ),
-                knob(
+                bipolar_knob(
                     "Detune",
                     format!("{:.0}", p.detune_cents.modulated_plain_value()),
                     &p.detune_cents,
                     Message::DetuneGestured
                 ),
-                knob(
+                bipolar_knob(
                     "Width",
                     format!("{:.0}%", p.stereo_width.modulated_plain_value() * 100.0),
                     &p.stereo_width,
@@ -569,13 +621,13 @@ impl OscillaGui {
         let master = section(
             "MASTER",
             row![
-                knob(
+                arc_knob(
                     "Volume",
                     format!("{:.0}%", p.volume.modulated_plain_value() * 100.0),
                     &p.volume,
                     Message::VolumeGestured
                 ),
-                knob(
+                arc_knob(
                     "Glide",
                     format!("{:.3}", p.glide_time.modulated_plain_value()),
                     &p.glide_time,

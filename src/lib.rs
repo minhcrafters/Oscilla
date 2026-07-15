@@ -339,7 +339,7 @@ impl Plugin for Oscilla {
             compiler: self.compiler.clone(),
             sample_rate: self.sample_rate.clone(),
             async_executor: executor,
-            script_content: EditorHandle(CodeEditor::new(&initial_text, "")),
+            script_content: EditorHandle(CodeEditor::new(&initial_text, "rs")),
         };
 
         nice_plug_iced::create_iced_editor(
