@@ -32,8 +32,7 @@ pub struct Oscilla {
     peak_output: Arc<AtomicF32>,
     notifier: PollSubNotifier,
     sample_rate: f32,
-    /// True until the first process() call compiles the saved script.
-    needs_init_compile: bool,
+    last_compiled: String,
 }
 
 // Background tasks
@@ -59,7 +58,7 @@ impl Default for Oscilla {
             peak_output: Arc::new(AtomicF32::new(0.0)),
             notifier: PollSubNotifier::new(),
             sample_rate,
-            needs_init_compile: true,
+            last_compiled: String::new(),
         }
     }
 }
@@ -380,22 +379,19 @@ impl Plugin for Oscilla {
         };
         self.engine.script_mode = mode;
 
-        if self.needs_init_compile {
-            self.needs_init_compile = false;
-            let script = self.params.wave_script.borrow().clone();
-            if script != "sin(x)" {
-                if let Err(e) = self.compiler.compile(&script, mode) {
-                    log::error!("Oscilla: init compile error: {e}");
-                } else if let Ok((wt_opt, tb_opt)) =
-                    self.compiler.generate_both(mode, self.sample_rate)
-                {
-                    if let Some(wt) = wt_opt {
-                        self.wavetable_slot.store(wt);
-                    }
-                    if let Some(tb) = tb_opt {
-                        self.time_buffer_slot.store(tb);
-                    }
+        let script = self.params.wave_script.borrow().clone();
+        if script != self.last_compiled {
+            if let Err(e) = self.compiler.compile(&script, mode) {
+                log::error!("Oscilla: init compile error: {e}");
+            } else if let Ok((wt_opt, tb_opt)) = self.compiler.generate_both(mode, self.sample_rate)
+            {
+                if let Some(wt) = wt_opt {
+                    self.wavetable_slot.store(wt);
                 }
+                if let Some(tb) = tb_opt {
+                    self.time_buffer_slot.store(tb);
+                }
+                self.last_compiled = script;
             }
             table = self.wavetable_slot.load();
             time_buf = self.time_buffer_slot.load();
