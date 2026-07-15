@@ -6,6 +6,7 @@
 
 use crate::OscillaParams;
 use crate::dsp::WavetableSlot;
+use crate::script::ScriptMode;
 use iced_audio::Gesture;
 use nice_plug::prelude::*;
 use nice_plug_iced::iced::{
@@ -191,6 +192,7 @@ pub enum Message {
     GlideGestured(Gesture),
 
     FilterTypeChanged(crate::dsp::filter::FilterType),
+    ScriptModeChanged(crate::script::ScriptMode),
 }
 
 // ── Editor state ──────────────────────────────────────────────────────
@@ -198,6 +200,7 @@ pub enum Message {
 pub struct OscillaEditorState {
     pub params: Arc<OscillaParams>,
     pub wavetable_slot: Arc<WavetableSlot>,
+    pub time_buffer_slot: Arc<crate::dsp::TimeBufferSlot>,
     pub peak_output: Arc<AtomicF32>,
     pub notifier: PollSubNotifier,
     pub compiler: Arc<crate::script::ScriptCompiler>,
@@ -251,23 +254,35 @@ impl OscillaGui {
             Message::EditorAction(a) => self.editor_state.script_content.perform(a),
             Message::CompileScript => {
                 let src = self.editor_state.script_content.text();
+                let mode = match self.editor_state.params.script_mode.modulated_plain_value() {
+                    0 => crate::script::ScriptMode::Wavetable,
+                    _ => crate::script::ScriptMode::TimeBased,
+                };
                 let comp = self.editor_state.compiler.clone();
                 self.status_message = String::from("Compiling...");
                 self.compile_ok = true;
-                match comp.compile(&src) {
-                    Ok(()) => match comp.generate_wavetable() {
-                        Ok(t) => {
-                            self.editor_state.wavetable_slot.store(t);
-                            // Persist script to params so DAW saves it.
-                            *self.editor_state.params.wave_script.borrow_mut() =
-                                self.editor_state.script_content.text();
-                            self.status_message = String::from("Compiled");
+                match comp.compile(&src, mode) {
+                    Ok(()) => {
+                        let sr = 44100.0; // default; actual sample rate from host isn't available here
+                        match comp.generate_both(mode, sr) {
+                            Ok((wt_opt, tb_opt)) => {
+                                if let Some(wt) = wt_opt {
+                                    self.editor_state.wavetable_slot.store(wt);
+                                }
+                                if let Some(tb) = tb_opt {
+                                    self.editor_state.time_buffer_slot.store(tb);
+                                }
+                                // Persist script to params so DAW saves it.
+                                *self.editor_state.params.wave_script.borrow_mut() =
+                                    self.editor_state.script_content.text();
+                                self.status_message = String::from("Compiled");
+                            }
+                            Err(e) => {
+                                self.status_message = format!("Gen error: {e}");
+                                self.compile_ok = false;
+                            }
                         }
-                        Err(e) => {
-                            self.status_message = format!("Gen error: {e}");
-                            self.compile_ok = false;
-                        }
-                    },
+                    }
                     Err(e) => {
                         self.status_message = format!("Error: {e}");
                         self.compile_ok = false;
@@ -305,6 +320,12 @@ impl OscillaGui {
                 setter.begin_set_parameter(&p.filter_type);
                 setter.set_parameter_normalized(&p.filter_type, ft as i32 as f32 / 2.0);
                 setter.end_set_parameter(&p.filter_type);
+            }
+            Message::ScriptModeChanged(mode) => {
+                let val = mode as i32 as f32 / 1.0;
+                setter.begin_set_parameter(&p.script_mode);
+                setter.set_parameter_normalized(&p.script_mode, val);
+                setter.end_set_parameter(&p.script_mode);
             }
         }
     }
@@ -369,11 +390,29 @@ impl OscillaGui {
                 },
             });
 
+        let mode = match p.script_mode.modulated_plain_value() {
+            0 => ScriptMode::Wavetable,
+            _ => ScriptMode::TimeBased,
+        };
+
+        let mode_picklist = pick_list(
+            &[ScriptMode::Wavetable, ScriptMode::TimeBased][..],
+            Some(mode),
+            Message::ScriptModeChanged,
+        )
+        .padding([5, 10])
+        .style(|_theme, _status| glass_picklist());
+
+        let mode_column = row![mode_picklist, heading("Mode"),]
+            .spacing(6)
+            .align_y(Center);
+
         let editor_panel = container(
             column![
                 heading("WAVEFORM SCRIPT"),
+                mode_column,
                 editor,
-                row![compile_btn, status_text(&self.status_message, ok)]
+                row![compile_btn, status_text(&self.status_message, ok),]
                     .spacing(12)
                     .align_y(Center),
             ]
@@ -387,6 +426,8 @@ impl OscillaGui {
         // ── Waveform preview (fixed height) ────────────────────────
         let preview = Canvas::new(WaveformPreview {
             wavetable: self.editor_state.wavetable_slot.load(),
+            time_buffer: self.editor_state.time_buffer_slot.load(),
+            mode,
             accent: ACCENT,
         })
         .width(Length::Fill)
@@ -583,6 +624,8 @@ impl OscillaGui {
 
 struct WaveformPreview {
     wavetable: crate::wavetable::SharedWavetable,
+    time_buffer: crate::wavetable::SharedTimeBuffer,
+    mode: ScriptMode,
     accent: Color,
 }
 
@@ -622,21 +665,44 @@ impl Program<Message> for WaveformPreview {
         );
 
         // Waveform path.
-        let data = self.wavetable.as_ref();
-        let step = (data.len() as f32 / w).max(1.0);
         let mut builder = canvas::path::Builder::new();
         let (mut first, mut i) = (true, 0.0f32);
-        while i < data.len() as f32 {
-            let s = data[i as usize];
-            let px = (i / data.len() as f32) * w;
-            let py = mid - s * mid * 0.80;
-            if first {
-                builder.move_to(iced::Point::new(px, py));
-                first = false;
-            } else {
-                builder.line_to(iced::Point::new(px, py));
+
+        match self.mode {
+            ScriptMode::Wavetable => {
+                let data = self.wavetable.as_ref();
+                let step = (data.len() as f32 / w).max(1.0);
+                while i < data.len() as f32 {
+                    let s = data[i as usize];
+                    let px = (i / data.len() as f32) * w;
+                    let py = mid - s * mid * 0.80;
+                    if first {
+                        builder.move_to(iced::Point::new(px, py));
+                        first = false;
+                    } else {
+                        builder.line_to(iced::Point::new(px, py));
+                    }
+                    i += step;
+                }
             }
-            i += step;
+            ScriptMode::TimeBased => {
+                let data = self.time_buffer.as_ref();
+                if !data.is_empty() {
+                    let step = (data.len() as f32 / w).max(1.0);
+                    while i < data.len() as f32 {
+                        let s = data[i as usize];
+                        let px = (i / data.len() as f32) * w;
+                        let py = mid - s * mid * 0.80;
+                        if first {
+                            builder.move_to(iced::Point::new(px, py));
+                            first = false;
+                        } else {
+                            builder.line_to(iced::Point::new(px, py));
+                        }
+                        i += step;
+                    }
+                }
+            }
         }
         let path = builder.build();
 

@@ -10,7 +10,8 @@ pub mod voice;
 
 use self::filter::FilterType;
 use self::voice::Voice;
-use crate::wavetable::{SharedWavetable, WAVETABLE_SIZE};
+use crate::script::ScriptMode;
+use crate::wavetable::{SharedTimeBuffer, SharedWavetable, WAVETABLE_SIZE};
 use arc_swap::ArcSwap;
 use smallvec::SmallVec;
 /// Maximum number of polyphonic voices.
@@ -42,6 +43,31 @@ impl WavetableSlot {
     }
 }
 
+/// Atomically swappable time-buffer container.
+///
+/// Same lock-free pattern as [`WavetableSlot`] but holds a variable-length
+/// time-domain buffer produced by time-based script mode.
+pub struct TimeBufferSlot {
+    inner: ArcSwap<Vec<f32>>,
+}
+
+impl TimeBufferSlot {
+    pub fn new(buf: SharedTimeBuffer) -> Self {
+        Self {
+            inner: ArcSwap::from(buf),
+        }
+    }
+
+    #[inline]
+    pub fn load(&self) -> SharedTimeBuffer {
+        self.inner.load_full()
+    }
+
+    pub fn store(&self, buf: SharedTimeBuffer) {
+        self.inner.store(buf);
+    }
+}
+
 /// A pending note command queued during MIDI processing.
 #[derive(Debug, Clone, Copy)]
 enum NoteCmd {
@@ -67,6 +93,8 @@ pub struct SynthEngine {
     detune_cents: f32,
     stereo_width: f32,
     glide_time: f32,
+    /// Which script mode is active (wavetable or time-based).
+    pub script_mode: ScriptMode,
 }
 
 impl SynthEngine {
@@ -84,6 +112,7 @@ impl SynthEngine {
             detune_cents: 10.0,
             stereo_width: 0.5,
             glide_time: 0.05,
+            script_mode: ScriptMode::Wavetable,
         }
     }
 
@@ -202,24 +231,36 @@ impl SynthEngine {
 
     /// Process a single stereo sample. Returns `(left, right)`.
     #[inline]
-    pub fn process_sample(&mut self, table: &SharedWavetable) -> (f32, f32) {
-        let data = table.as_ref();
+    pub fn process_sample(
+        &mut self,
+        wavetable: &SharedWavetable,
+        time_buf: &SharedTimeBuffer,
+    ) -> (f32, f32) {
         let mut l = 0.0f32;
         let mut r = 0.0f32;
 
-        let n = self.unison_voices;
-        for v in self.voices.iter_mut() {
-            let (vl, vr) = v.process(data, n);
-            l += vl;
-            r += vr;
+        match self.script_mode {
+            ScriptMode::Wavetable => {
+                let data = wavetable.as_ref();
+                let n = self.unison_voices;
+                for v in self.voices.iter_mut() {
+                    let (vl, vr) = v.process(data, n);
+                    l += vl;
+                    r += vr;
+                }
+            }
+            ScriptMode::TimeBased => {
+                for v in self.voices.iter_mut() {
+                    let (vl, vr) = v.process_time(time_buf);
+                    l += vl;
+                    r += vr;
+                }
+            }
         }
 
         let vol = self.volume;
 
         // Tanh soft-clip: smooth saturation at high amplitudes.
-        // Under normal operating conditions the synth stays well below ±1.0
-        // so this is transparent; it only activates as a last-resort safety
-        // net if voices somehow still produce runaway values.
         let l_out = (l * vol).tanh();
         let r_out = (r * vol).tanh();
         (l_out, r_out)

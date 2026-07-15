@@ -11,9 +11,9 @@ pub mod script;
 pub mod wavetable;
 
 use crate::dsp::filter::FilterType;
-use crate::dsp::{SynthEngine, WavetableSlot};
-use crate::script::ScriptCompiler;
-use crate::wavetable::default_wavetable;
+use crate::dsp::{SynthEngine, TimeBufferSlot, WavetableSlot};
+use crate::script::{ScriptCompiler, ScriptMode};
+use crate::wavetable::{default_time_buffer, default_wavetable};
 use atomic_refcell::AtomicRefCell;
 use nice_plug::prelude::*;
 use nice_plug_iced::iced::PollSubNotifier;
@@ -27,6 +27,7 @@ pub struct Oscilla {
     params: Arc<OscillaParams>,
     engine: SynthEngine,
     wavetable_slot: Arc<WavetableSlot>,
+    time_buffer_slot: Arc<TimeBufferSlot>,
     compiler: Arc<ScriptCompiler>,
     peak_output: Arc<AtomicF32>,
     notifier: PollSubNotifier,
@@ -40,18 +41,20 @@ pub struct Oscilla {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum OscillaTask {
-    CompileScript(String),
+    CompileScript { source: String, mode: ScriptMode },
 }
 
 impl Default for Oscilla {
     fn default() -> Self {
         let sample_rate = 44100.0;
         let default_table = default_wavetable();
+        let default_time_buf = default_time_buffer(sample_rate);
 
         Self {
             params: Arc::new(OscillaParams::default()),
             engine: SynthEngine::new(sample_rate),
             wavetable_slot: Arc::new(WavetableSlot::new(Arc::new(default_table))),
+            time_buffer_slot: Arc::new(TimeBufferSlot::new(Arc::new(default_time_buf))),
             compiler: Arc::new(ScriptCompiler::new()),
             peak_output: Arc::new(AtomicF32::new(0.0)),
             notifier: PollSubNotifier::new(),
@@ -108,6 +111,10 @@ pub struct OscillaParams {
 
     #[id = "glide"]
     pub glide_time: FloatParam,
+
+    /// 0 = Wavetable (x-based), 1 = Time-based (t-based).
+    #[id = "script_mode"]
+    pub script_mode: IntParam,
 
     /// The wave script is persisted but not automatable.
     #[persist = "wave-script"]
@@ -243,6 +250,8 @@ impl Default for OscillaParams {
             .with_value_to_string(Arc::new(|v| format!("{v:.3}")))
             .with_string_to_value(Arc::new(parse_f32)),
 
+            script_mode: IntParam::new("Script Mode", 0, IntRange::Linear { min: 0, max: 1 }),
+
             wave_script: AtomicRefCell::new(String::from("sin(x)")),
         }
     }
@@ -281,18 +290,25 @@ impl Plugin for Oscilla {
     }
 
     fn task_executor(&mut self) -> Box<dyn Fn(Self::BackgroundTask) + Send> {
-        let slot = self.wavetable_slot.clone();
+        let wt_slot = self.wavetable_slot.clone();
+        let tb_slot = self.time_buffer_slot.clone();
         let compiler = self.compiler.clone();
         let notifier = self.notifier.clone();
+        let sr = self.sample_rate;
 
         Box::new(move |task| match task {
-            OscillaTask::CompileScript(source) => match compiler.compile(&source) {
-                Ok(()) => match compiler.generate_wavetable() {
-                    Ok(new_table) => {
-                        slot.store(new_table);
+            OscillaTask::CompileScript { source, mode } => match compiler.compile(&source, mode) {
+                Ok(()) => match compiler.generate_both(mode, sr) {
+                    Ok((wt_opt, tb_opt)) => {
+                        if let Some(wt) = wt_opt {
+                            wt_slot.store(wt);
+                        }
+                        if let Some(tb) = tb_opt {
+                            tb_slot.store(tb);
+                        }
                         notifier.notify();
                     }
-                    Err(e) => log::error!("Oscilla: wavetable generation: {e}"),
+                    Err(e) => log::error!("Oscilla: buffer generation: {e}"),
                 },
                 Err(e) => log::error!("Oscilla: script compile: {e}"),
             },
@@ -304,6 +320,7 @@ impl Plugin for Oscilla {
         let editor_state = gui::OscillaEditorState {
             params: self.params.clone(),
             wavetable_slot: self.wavetable_slot.clone(),
+            time_buffer_slot: self.time_buffer_slot.clone(),
             peak_output: self.peak_output.clone(),
             notifier: self.notifier.clone(),
             compiler: self.compiler.clone(),
@@ -352,22 +369,37 @@ impl Plugin for Oscilla {
             self.needs_init_compile = false;
             let script = self.params.wave_script.borrow().clone();
             if script != "sin(x)" {
-                if let Err(e) = self.compiler.compile(&script) {
+                let mode = match self.params.script_mode.modulated_plain_value() {
+                    0 => ScriptMode::Wavetable,
+                    _ => ScriptMode::TimeBased,
+                };
+                if let Err(e) = self.compiler.compile(&script, mode) {
                     log::error!("Oscilla: init compile error: {e}");
-                } else if let Ok(table) = self.compiler.generate_wavetable() {
-                    self.wavetable_slot.store(table);
+                } else if let Ok((wt_opt, tb_opt)) =
+                    self.compiler.generate_both(mode, self.sample_rate)
+                {
+                    if let Some(wt) = wt_opt {
+                        self.wavetable_slot.store(wt);
+                    }
+                    if let Some(tb) = tb_opt {
+                        self.time_buffer_slot.store(tb);
+                    }
                 }
             }
         }
 
         let table = self.wavetable_slot.load();
+        let time_buf = self.time_buffer_slot.load();
         let mut next_event = context.next_event();
         let mut had_events = false;
         let mut peak = 0.0f32;
 
         // ── Per-block parameter update ─────────────────────────────
-        // These push to all voices and are moderately expensive — do them
-        // once per block rather than once per sample.
+        let mode = match self.params.script_mode.modulated_plain_value() {
+            0 => ScriptMode::Wavetable,
+            _ => ScriptMode::TimeBased,
+        };
+        self.engine.script_mode = mode;
         let ft = match self.params.filter_type.modulated_plain_value() {
             0 => FilterType::LowPass,
             1 => FilterType::HighPass,
@@ -418,7 +450,7 @@ impl Plugin for Oscilla {
             self.engine.set_volume(self.params.volume.smoothed.next());
 
             // Render one sample.
-            let (l, r) = self.engine.process_sample(&table);
+            let (l, r) = self.engine.process_sample(&table, &time_buf);
 
             let mut ch = channel_samples.into_iter();
             if let Some(s) = ch.next() {
