@@ -238,6 +238,7 @@ impl SynthEngine {
     pub fn set_sample_rate(&mut self, sr: f32) {
         self.sample_rate = sr;
         for v in self.voices.iter_mut() {
+            v.sample_rate = sr;
             v.env.set_sample_rate(sr);
             v.filt.set_sample_rate(sr);
         }

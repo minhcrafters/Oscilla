@@ -185,7 +185,7 @@ pub struct OscillaEditorState {
     pub peak_output: Arc<AtomicF32>,
     pub notifier: PollSubNotifier,
     pub compiler: Arc<ScriptCompiler>,
-    pub sample_rate: f32,
+    pub sample_rate: Arc<AtomicF32>,
     pub script_content: text_editor::Content,
 }
 
@@ -254,7 +254,7 @@ impl OscillaGui {
                 self.compile_ok = true;
                 match comp.compile(&src, mode) {
                     Ok(()) => {
-                        let sr = self.editor_state.sample_rate;
+                        let sr = self.editor_state.sample_rate.load(Ordering::Relaxed);
                         match comp.generate_both(mode, sr) {
                             Ok((wt_opt, tb_opt)) => {
                                 if let Some(wt) = wt_opt {

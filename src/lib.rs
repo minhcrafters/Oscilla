@@ -30,8 +30,8 @@ pub struct Oscilla {
     time_buffer_slot: Arc<TimeBufferSlot>,
     compiler: Arc<ScriptCompiler>,
     peak_output: Arc<AtomicF32>,
+    sample_rate: Arc<AtomicF32>,
     notifier: PollSubNotifier,
-    sample_rate: f32,
     last_compiled: String,
 }
 
@@ -45,13 +45,13 @@ pub enum OscillaTask {
 
 impl Default for Oscilla {
     fn default() -> Self {
-        let sample_rate = 44100.0;
+        let sample_rate = Arc::new(AtomicF32::new(44100.0));
         let default_table = default_wavetable();
-        let default_time_buf = default_time_buffer(sample_rate);
+        let default_time_buf = default_time_buffer(44100.0);
 
         Self {
             params: Arc::new(OscillaParams::default()),
-            engine: SynthEngine::new(sample_rate),
+            engine: SynthEngine::new(sample_rate.load(Ordering::Relaxed)),
             wavetable_slot: Arc::new(WavetableSlot::new(Arc::new(default_table))),
             time_buffer_slot: Arc::new(TimeBufferSlot::new(Arc::new(default_time_buf))),
             compiler: Arc::new(ScriptCompiler::new()),
@@ -293,7 +293,7 @@ impl Plugin for Oscilla {
         let tb_slot = self.time_buffer_slot.clone();
         let compiler = self.compiler.clone();
         let notifier = self.notifier.clone();
-        let sr = self.sample_rate;
+        let sr = self.sample_rate.load(Ordering::Relaxed);
 
         Box::new(move |task| match task {
             OscillaTask::CompileScript { source, mode } => match compiler.compile(&source, mode) {
@@ -323,7 +323,7 @@ impl Plugin for Oscilla {
             peak_output: self.peak_output.clone(),
             notifier: self.notifier.clone(),
             compiler: self.compiler.clone(),
-            sample_rate: self.sample_rate,
+            sample_rate: self.sample_rate.clone(),
             script_content: text_editor::Content::with_text(&initial_text),
         };
 
@@ -353,8 +353,9 @@ impl Plugin for Oscilla {
         buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
-        self.sample_rate = buffer_config.sample_rate;
-        self.engine.set_sample_rate(self.sample_rate);
+        self.sample_rate
+            .store(buffer_config.sample_rate, Ordering::Relaxed);
+        self.engine.set_sample_rate(buffer_config.sample_rate);
         true
     }
 
@@ -380,7 +381,9 @@ impl Plugin for Oscilla {
         if script != self.last_compiled {
             if let Err(e) = self.compiler.compile(&script, mode) {
                 log::error!("Oscilla: init compile error: {e}");
-            } else if let Ok((wt_opt, tb_opt)) = self.compiler.generate_both(mode, self.sample_rate)
+            } else if let Ok((wt_opt, tb_opt)) = self
+                .compiler
+                .generate_both(mode, self.sample_rate.load(Ordering::Relaxed))
             {
                 if let Some(wt) = wt_opt {
                     self.wavetable_slot.store(wt);
