@@ -130,7 +130,7 @@ impl Default for OscillaParams {
             window_state: nice_plug_iced::WindowState::from_logical_size(W, H),
 
             volume: FloatParam::new("Volume", 0.8, FloatRange::Linear { min: 0.0, max: 1.0 })
-                .with_smoother(SmoothingStyle::Linear(20.0))
+                .with_smoother(SmoothingStyle::Linear(5.0))
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
 
@@ -143,7 +143,7 @@ impl Default for OscillaParams {
                     factor: FloatRange::skew_factor(-2.0),
                 },
             )
-            .with_smoother(SmoothingStyle::Linear(10.0))
+            .with_smoother(SmoothingStyle::Linear(5.0))
             .with_unit(" s")
             .with_value_to_string(Arc::new(|v| format!("{v:.3}")))
             .with_string_to_value(Arc::new(parse_f32)),
@@ -157,13 +157,13 @@ impl Default for OscillaParams {
                     factor: FloatRange::skew_factor(-2.0),
                 },
             )
-            .with_smoother(SmoothingStyle::Linear(10.0))
+            .with_smoother(SmoothingStyle::Linear(5.0))
             .with_unit(" s")
             .with_value_to_string(Arc::new(|v| format!("{v:.3}")))
             .with_string_to_value(Arc::new(parse_f32)),
 
             sustain: FloatParam::new("Sustain", 0.7, FloatRange::Linear { min: 0.0, max: 1.0 })
-                .with_smoother(SmoothingStyle::Linear(10.0))
+                .with_smoother(SmoothingStyle::Linear(5.0))
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
 
@@ -176,21 +176,21 @@ impl Default for OscillaParams {
                     factor: FloatRange::skew_factor(-2.0),
                 },
             )
-            .with_smoother(SmoothingStyle::Linear(10.0))
+            .with_smoother(SmoothingStyle::Linear(5.0))
             .with_unit(" s")
             .with_value_to_string(Arc::new(|v| format!("{v:.3}")))
             .with_string_to_value(Arc::new(parse_f32)),
 
             filter_cutoff: FloatParam::new(
                 "Cutoff",
-                5000.0,
+                20000.0,
                 FloatRange::Skewed {
                     min: 20.0,
                     max: 20000.0,
                     factor: FloatRange::skew_factor(-1.5),
                 },
             )
-            .with_smoother(SmoothingStyle::Logarithmic(30.0))
+            .with_smoother(SmoothingStyle::Logarithmic(10.0))
             .with_unit(" Hz")
             .with_value_to_string(formatters::v2s_f32_hz_then_khz(0))
             .with_string_to_value(formatters::s2v_f32_hz_then_khz()),
@@ -203,7 +203,7 @@ impl Default for OscillaParams {
                     max: 0.99,
                 },
             )
-            .with_smoother(SmoothingStyle::Linear(10.0))
+            .with_smoother(SmoothingStyle::Linear(5.0))
             .with_value_to_string(formatters::v2s_f32_percentage(0))
             .with_string_to_value(formatters::s2v_f32_percentage()),
 
@@ -214,7 +214,7 @@ impl Default for OscillaParams {
                 1.0,
                 FloatRange::Linear { min: 1.0, max: 7.0 },
             )
-            .with_smoother(SmoothingStyle::Linear(5.0))
+            .with_smoother(SmoothingStyle::Linear(2.0))
             .with_value_to_string(Arc::new(|v| format!("{}", v as i32)))
             .with_string_to_value(Arc::new(parse_f32)),
 
@@ -226,13 +226,13 @@ impl Default for OscillaParams {
                     max: 50.0,
                 },
             )
-            .with_smoother(SmoothingStyle::Linear(10.0))
+            .with_smoother(SmoothingStyle::Linear(5.0))
             .with_unit(" cents")
             .with_value_to_string(Arc::new(|v| format!("{v:.0}")))
             .with_string_to_value(Arc::new(parse_f32)),
 
             stereo_width: FloatParam::new("Width", 0.5, FloatRange::Linear { min: 0.0, max: 1.0 })
-                .with_smoother(SmoothingStyle::Linear(10.0))
+                .with_smoother(SmoothingStyle::Linear(5.0))
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
 
@@ -245,7 +245,7 @@ impl Default for OscillaParams {
                     factor: FloatRange::skew_factor(-1.5),
                 },
             )
-            .with_smoother(SmoothingStyle::Linear(10.0))
+            .with_smoother(SmoothingStyle::Linear(5.0))
             .with_unit(" s")
             .with_value_to_string(Arc::new(|v| format!("{v:.3}")))
             .with_string_to_value(Arc::new(parse_f32)),

@@ -1,8 +1,4 @@
-//! Iced GUI for Oscilla — Glassmorphism Dark Theme.
-//!
-//! Knob-based controls with frosted glass panels. Flexible grid layout
-//! with the script editor filling available space and the waveform
-//! preview at a fixed height. Monospace fonts in the editor and values.
+//! Iced GUI for Oscilla — VS Code Dark IDE theme.
 
 use crate::OscillaParams;
 use crate::dsp::WavetableSlot;
@@ -11,6 +7,8 @@ use iced_audio::Gesture;
 use nice_plug::prelude::*;
 use nice_plug_iced::iced::{
     self, Background, Border, Center, Color, Font, Length, PollSubNotifier, Shadow, Theme, border,
+    font,
+    theme::Palette,
     widget::{
         button,
         canvas::{self, Canvas, Frame, Geometry, Program},
@@ -21,30 +19,30 @@ use nice_plug_iced::{EditorState, NiceGuiContext};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-// ── Glassmorphism palette ─────────────────────────────────────────────
+// ── VS Code Dark+ palette ─────────────────────────────────────────────
 
-const BG_DEEP: Color = Color::from_rgb(0.06, 0.06, 0.14);
-const SURFACE: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.06);
-const SURFACE_ELEV: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.10);
-const BORDER: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.08);
-const ACCENT: Color = Color::from_rgb(0.37, 0.42, 0.82);
-const ACCENT_SOFT: Color = Color::from_rgba(0.37, 0.42, 0.82, 0.25);
-const FG_DIM: Color = Color::from_rgb(0.54, 0.56, 0.60); // muted labels
-const FG_TEXT: Color = Color::from_rgb(0.85, 0.86, 0.90); // body text
-const GREEN: Color = Color::from_rgb(0.31, 0.85, 0.56);
-const RED: Color = Color::from_rgb(0.94, 0.31, 0.31);
+const BG_DEEP: Color = Color::from_rgb(0.118, 0.118, 0.118); // #1E1E1E  editor background
+const SURFACE: Color = Color::from_rgb(0.145, 0.145, 0.149); // #252526  panel / sidebar
+const BORDER: Color = Color::from_rgb(0.235, 0.235, 0.235); // #3C3C3C  thin separators
+const ACCENT: Color = Color::from_rgb(0.0, 0.478, 0.8); // #007ACC  VS Code blue
+const ACCENT_SOFT: Color = Color::from_rgba(0.0, 0.478, 0.8, 0.12); // subtle wash (status bar, hover)
+const ACCENT_GLOW: Color = Color::from_rgba(0.0, 0.478, 0.8, 0.22); // waveform under-glow
+const ACCENT_LINE: Color = Color::from_rgba(0.0, 0.478, 0.8, 0.15); // waveform centre line
+const FG_DIM: Color = Color::from_rgb(0.522, 0.522, 0.522); // #858585  muted labels
+const FG_TEXT: Color = Color::from_rgb(0.831, 0.831, 0.831); // #D4D4D4  body text
+const GREEN: Color = Color::from_rgb(0.306, 0.788, 0.690); // #4EC9B0  terminal green (success)
+const RED: Color = Color::from_rgb(0.945, 0.298, 0.298); // #F14C4C  error red
+const YELLOW: Color = Color::from_rgb(0.875, 0.808, 0.0); // #DFCE00  warning yellow
 
 // ── Typography ────────────────────────────────────────────────────────
 
-/// Section headings: monospace, semibold, uppercase feel.
 fn heading(label: &str) -> text::Text<'_> {
     text(label).size(10).color(FG_DIM).font(Font {
         weight: font::Weight::Semibold,
-        ..Font::MONOSPACE
+        ..Font::DEFAULT
     })
 }
 
-/// Knob label underneath.
 fn knob_label(label: &str) -> text::Text<'_> {
     text(label)
         .size(10)
@@ -57,7 +55,6 @@ fn knob_label(label: &str) -> text::Text<'_> {
         .width(Length::Fill)
 }
 
-/// Value readout below knob — monospace for clean numeric alignment.
 fn value_label(val: String) -> text::Text<'static> {
     text(val)
         .size(10)
@@ -70,15 +67,13 @@ fn value_label(val: String) -> text::Text<'static> {
         .width(Length::Fill)
 }
 
-/// Button text.
 fn btn_text(label: &str) -> text::Text<'_> {
-    text(label).size(12).color(Color::WHITE).font(Font {
+    text(label).size(11).color(Color::WHITE).font(Font {
         weight: font::Weight::Semibold,
         ..Font::DEFAULT
     })
 }
 
-/// Status / footer text.
 fn status_text(label: &str, color: Color) -> text::Text<'_> {
     text(label).size(11).color(color).font(Font {
         weight: font::Weight::Normal,
@@ -86,7 +81,6 @@ fn status_text(label: &str, color: Color) -> text::Text<'_> {
     })
 }
 
-/// Peak meter readout.
 fn peak_text(val: String) -> text::Text<'static> {
     text(val).size(11).color(ACCENT).font(Font {
         weight: font::Weight::Bold,
@@ -94,21 +88,19 @@ fn peak_text(val: String) -> text::Text<'static> {
     })
 }
 
-use nice_plug_iced::iced::font;
-
 fn rad(r: f32) -> border::Radius {
     border::radius(r)
 }
 
 // ── Reusable style functions ──────────────────────────────────────────
 
-fn glass_panel() -> container::Style {
+fn section_panel() -> container::Style {
     container::Style {
         background: Some(Background::Color(SURFACE)),
         border: Border {
             color: BORDER,
             width: 1.0,
-            radius: rad(16.0),
+            radius: rad(4.0),
         },
         shadow: Shadow::default(),
         text_color: None,
@@ -116,40 +108,23 @@ fn glass_panel() -> container::Style {
     }
 }
 
-fn glass_panel_accent() -> container::Style {
-    container::Style {
-        background: Some(Background::Color(SURFACE)),
-        border: Border {
-            color: Color::from_rgba(0.37, 0.42, 0.82, 0.2),
-            width: 1.0,
-            radius: rad(16.0),
-        },
-        shadow: Shadow::default(),
-        text_color: None,
-        snap: false,
-    }
-}
-
-fn glass_btn(glow: bool) -> button::Style {
-    let shadow = if glow {
-        Shadow {
-            color: ACCENT_SOFT,
-            offset: iced::Vector::new(0.0, 2.0),
-            blur_radius: 14.0,
-        }
-    } else {
+fn btn_style(hovered: bool) -> button::Style {
+    let border_alpha = if hovered { 0.6 } else { 0.3 };
+    let shadow = if hovered {
         Shadow {
             color: ACCENT_SOFT,
             offset: iced::Vector::new(0.0, 1.0),
-            blur_radius: 8.0,
+            blur_radius: 6.0,
         }
+    } else {
+        Shadow::default()
     };
     button::Style {
         background: Some(Background::Color(ACCENT)),
         border: Border {
-            color: Color::from_rgba(0.37, 0.42, 0.82, if glow { 0.5 } else { 0.3 }),
+            color: Color::from_rgba(0.0, 0.478, 0.8, border_alpha),
             width: 1.0,
-            radius: rad(10.0),
+            radius: rad(3.0),
         },
         text_color: Color::WHITE,
         shadow,
@@ -157,16 +132,16 @@ fn glass_btn(glow: bool) -> button::Style {
     }
 }
 
-fn glass_picklist() -> pick_list::Style {
+fn picklist_style() -> pick_list::Style {
     pick_list::Style {
         text_color: FG_TEXT,
-        placeholder_color: Color::from_rgba(1.0, 1.0, 1.0, 0.2),
-        handle_color: ACCENT,
-        background: Background::Color(SURFACE_ELEV),
+        placeholder_color: FG_DIM,
+        handle_color: FG_DIM,
+        background: Background::Color(SURFACE),
         border: Border {
             color: BORDER,
             width: 1.0,
-            radius: rad(8.0),
+            radius: rad(4.0),
         },
     }
 }
@@ -240,7 +215,17 @@ impl OscillaGui {
     }
 
     pub fn theme(&self) -> Option<Theme> {
-        Some(Theme::Dark)
+        Some(Theme::custom(
+            "VS Code Dark+",
+            Palette {
+                background: BG_DEEP,
+                text: FG_TEXT,
+                primary: ACCENT,
+                success: GREEN,
+                danger: RED,
+                warning: YELLOW,
+            },
+        ))
     }
 
     pub fn update(&mut self, message: Message) {
@@ -355,7 +340,7 @@ impl OscillaGui {
             kids: iced::widget::Row<'a, Message>,
         ) -> iced::widget::Container<'a, Message> {
             container(column![heading(label), kids].spacing(10))
-                .style(|_| glass_panel())
+                .style(|_| section_panel())
                 .padding(14)
                 .width(Length::Fill)
         }
@@ -367,7 +352,18 @@ impl OscillaGui {
             .font(Font::MONOSPACE)
             .size(iced::Pixels(13.0))
             .height(Length::Fill)
-            .highlight("Rust", iced_highlighter::Theme::SolarizedDark);
+            .style(|_theme, _status| text_editor::Style {
+                background: Background::Color(BG_DEEP),
+                border: Border {
+                    color: BORDER,
+                    width: 1.0,
+                    radius: rad(3.0),
+                },
+                placeholder: FG_DIM,
+                selection: Color::from_rgba(0.0, 0.478, 0.8, 0.3),
+                value: FG_TEXT,
+            })
+            .highlight("Rust", iced_highlighter::Theme::Base16Ocean);
 
         let ok = if self.compile_ok { GREEN } else { RED };
 
@@ -375,14 +371,14 @@ impl OscillaGui {
             .on_press(Message::CompileScript)
             .padding([6, 18])
             .style(|_theme, status| match status {
-                button::Status::Active => glass_btn(false),
-                button::Status::Hovered | button::Status::Pressed => glass_btn(true),
+                button::Status::Active => btn_style(false),
+                button::Status::Hovered | button::Status::Pressed => btn_style(true),
                 _ => button::Style {
-                    background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.05))),
+                    background: Some(Background::Color(SURFACE)),
                     border: Border {
                         color: BORDER,
                         width: 1.0,
-                        radius: rad(10.0),
+                        radius: rad(3.0),
                     },
                     text_color: FG_DIM,
                     shadow: Shadow::default(),
@@ -400,8 +396,9 @@ impl OscillaGui {
             Some(mode),
             Message::ScriptModeChanged,
         )
-        .padding([5, 10])
-        .style(|_theme, _status| glass_picklist());
+        .text_size(11)
+        .padding([6, 12])
+        .style(|_theme, _status| picklist_style());
 
         let mode_column = row![mode_picklist, heading("Mode"),]
             .spacing(6)
@@ -418,7 +415,7 @@ impl OscillaGui {
             ]
             .spacing(8),
         )
-        .style(|_| glass_panel_accent())
+        .style(|_| section_panel())
         .padding(12)
         .width(Length::Fill)
         .height(Length::Fill);
@@ -434,7 +431,7 @@ impl OscillaGui {
         .height(Length::Fixed(100.0));
 
         let preview_panel = container(preview)
-            .style(|_| glass_panel())
+            .style(|_| section_panel())
             .padding(4)
             .width(Length::Fill);
 
@@ -509,8 +506,9 @@ impl OscillaGui {
                         Some(ft),
                         Message::FilterTypeChanged,
                     )
-                    .padding([5, 10])
-                    .style(|_theme, _status| glass_picklist()),
+                    .text_size(11)
+                    .padding([6, 12])
+                    .style(|_theme, _status| picklist_style()),
                 ]
                 .spacing(6)
                 .align_x(Center),
@@ -580,7 +578,7 @@ impl OscillaGui {
             ]
             .spacing(16),
         )
-        .style(|_| glass_panel())
+        .style(|_| section_panel())
         .padding([8, 14])
         .width(Length::Fill);
 
@@ -661,7 +659,7 @@ impl Program<Message> for WaveformPreview {
         frame.fill_rectangle(
             iced::Point::new(0.0, mid - 0.5),
             iced::Size::new(w, 1.0),
-            Color::from_rgba(0.37, 0.42, 0.82, 0.15),
+            ACCENT_LINE,
         );
 
         // Waveform path.
@@ -710,7 +708,7 @@ impl Program<Message> for WaveformPreview {
         frame.stroke(
             &path,
             canvas::Stroke::default()
-                .with_color(Color::from_rgba(0.37, 0.42, 0.82, 0.30))
+                .with_color(ACCENT_GLOW)
                 .with_width(3.0),
         );
         // Sharp waveform on top.
