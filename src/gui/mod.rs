@@ -1,5 +1,3 @@
-//! Iced GUI for Oscilla — VS Code Dark IDE theme.
-
 use crate::OscillaParams;
 use crate::OscillaTask;
 use crate::dsp::filter::FilterType;
@@ -58,7 +56,7 @@ pub mod knob_style;
 
 const BG_DEEP: Color = Color::from_rgb(0.118, 0.118, 0.118);
 const SURFACE: Color = Color::from_rgb(0.145, 0.145, 0.149);
-const BORDER: Color = Color::from_rgb(0.235, 0.235, 0.235);
+const BORDER: Color = Color::from_rgb(0.243, 0.243, 0.259);
 const ACCENT: Color = Color::from_rgb(0.0, 0.478, 0.8);
 const ACCENT_SOFT: Color = Color::from_rgba(0.0, 0.478, 0.8, 0.12);
 const ACCENT_GLOW: Color = Color::from_rgba(0.0, 0.478, 0.8, 0.22);
@@ -75,10 +73,10 @@ fn vscode_editor_style() -> theme::Style {
         background: BG_DEEP,
         text_color: FG_TEXT,
         gutter_background: BG_DEEP,
-        gutter_border: Color::from_rgb(0.18, 0.18, 0.18),
+        gutter_border: BORDER,
         line_number_color: FG_DIM,
         scrollbar_background: BG_DEEP,
-        scroller_color: Color::from_rgb(0.30, 0.30, 0.30),
+        scroller_color: BORDER,
         current_line_highlight: Color::from_rgba(1.0, 1.0, 1.0, 0.04),
     }
 }
@@ -230,12 +228,11 @@ pub struct OscillaEditorState {
     pub compiler: Arc<ScriptCompiler>,
     pub sample_rate: Arc<AtomicF32>,
     pub async_executor: Arc<dyn Fn(OscillaTask) + Send + Sync>,
-    pub script_content: EditorHandle,
+    pub editor_handle: EditorHandle,
 }
 
 // --- Knob helpers ---
 
-/// Create a unipolar arc knob: label → knob → value.
 fn arc_knob<'a>(
     label: &'a str,
     value: String,
@@ -252,7 +249,7 @@ fn arc_knob<'a>(
     .align_x(Center)
 }
 
-/// Create a bipolar arc knob: label → knob → value.
+#[allow(dead_code)]
 fn bipolar_knob<'a>(
     label: &'a str,
     value: String,
@@ -291,21 +288,18 @@ impl OscillaGui {
         // DAW restores params AFTER editor() creates OscillaEditorState,
         // so script_content may still be the default. Sync it now.
         let saved = editor_state.params.wave_script.borrow().clone();
-        if editor_state.script_content.content() != saved {
-            let _ = editor_state.script_content.reset(&saved);
+        if editor_state.editor_handle.content() != saved {
+            let _ = editor_state.editor_handle.reset(&saved);
         }
 
         // Configure the code editor to match VS Code Dark+ theme.
-        editor_state.script_content.set_font(Font::MONOSPACE);
-        editor_state.script_content.set_font_size(13.0, true);
-        editor_state.script_content.set_line_numbers_enabled(false);
+        editor_state.editor_handle.set_font(Font::MONOSPACE);
+        editor_state.editor_handle.set_font_size(13.0, true);
+        editor_state.editor_handle.set_search_replace_enabled(false);
+        editor_state.editor_handle.set_folding_enabled(false);
+        editor_state.editor_handle.set_theme(vscode_editor_style());
         editor_state
-            .script_content
-            .set_search_replace_enabled(false);
-        editor_state.script_content.set_folding_enabled(false);
-        editor_state.script_content.set_theme(vscode_editor_style());
-        editor_state
-            .script_content
+            .editor_handle
             .set_indent_style(IndentStyle::Spaces(2));
 
         Self {
@@ -352,10 +346,10 @@ impl OscillaGui {
                 }
             }
             Message::EditorEvent(event) => {
-                let _ = CodeEditor::update(&mut self.editor_state.script_content, &event);
+                let _ = CodeEditor::update(&mut self.editor_state.editor_handle, &event);
             }
             Message::CompileScript => {
-                let src = self.editor_state.script_content.content();
+                let src = self.editor_state.editor_handle.content();
                 let mode = match self.editor_state.params.script_mode.modulated_plain_value() {
                     0 => ScriptMode::Wavetable,
                     _ => ScriptMode::TimeBased,
@@ -424,7 +418,7 @@ impl OscillaGui {
 
         let editor: Element<'_, Message> = self
             .editor_state
-            .script_content
+            .editor_handle
             .view()
             .map(Message::EditorEvent);
 
@@ -601,13 +595,13 @@ impl OscillaGui {
                     &p.unison_voices,
                     Message::UnisonVoicesGestured
                 ),
-                bipolar_knob(
+                arc_knob(
                     "Detune",
                     format!("{:.0}", p.detune_cents.modulated_plain_value()),
                     &p.detune_cents,
                     Message::DetuneGestured
                 ),
-                bipolar_knob(
+                arc_knob(
                     "Width",
                     format!("{:.0}%", p.stereo_width.modulated_plain_value() * 100.0),
                     &p.stereo_width,

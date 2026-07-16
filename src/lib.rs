@@ -129,14 +129,14 @@ impl Default for OscillaParams {
         Self {
             window_state: nice_plug_iced::WindowState::from_logical_size(W, H),
 
-            volume: FloatParam::new("Volume", 0.8, FloatRange::Linear { min: 0.0, max: 1.0 })
+            volume: FloatParam::new("Volume", 0.5, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_smoother(SmoothingStyle::Linear(5.0))
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
 
             attack: FloatParam::new(
                 "Attack",
-                0.01,
+                0.005,
                 FloatRange::Skewed {
                     min: 0.001,
                     max: 4.0,
@@ -339,7 +339,7 @@ impl Plugin for Oscilla {
             compiler: self.compiler.clone(),
             sample_rate: self.sample_rate.clone(),
             async_executor: executor,
-            script_content: EditorHandle(CodeEditor::new(&initial_text, "rs")),
+            editor_handle: EditorHandle(CodeEditor::new(&initial_text, "rs")),
         };
 
         nice_plug_iced::create_iced_editor(
@@ -514,9 +514,8 @@ impl Plugin for Oscilla {
 // Format exports
 
 impl ClapPlugin for Oscilla {
-    const CLAP_ID: &'static str = "me.pychael.oscilla.synth";
-    const CLAP_DESCRIPTION: Option<&'static str> =
-        Some("Programmable oscillator synthesizer — a shader language for sound");
+    const CLAP_ID: &'static str = "me.pychael.oscilla";
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("Programmable oscillator synthesizer");
     const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[

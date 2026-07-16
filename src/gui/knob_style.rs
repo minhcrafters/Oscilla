@@ -1,34 +1,32 @@
-//! Custom knob styles for Oscilla — VS Code Dark+ themed.
-
 use iced_audio::{knob, text_marks};
 use nice_plug_iced::iced::widget::canvas::LineCap;
 
-// --- Colors (VS Code Dark+ derived) ---
+// Colors
 
 mod colors {
     use nice_plug_iced::iced::Color;
 
-    /// Knob surface background.
-    pub const KNOB_BG: Color = Color::from_rgb(0.18, 0.18, 0.18);
-    /// Knob border ring.
-    pub const KNOB_BORDER: Color = Color::from_rgb(0.25, 0.25, 0.25);
-    /// Notch / handle colour.
+    /// Knob surface background (#252526).
+    pub const KNOB_BG: Color = Color::from_rgb(0.145, 0.145, 0.149);
+    /// Knob border ring (#3e3e42).
+    pub const KNOB_BORDER: Color = Color::from_rgb(0.243, 0.243, 0.259);
+    /// Notch / handle colour (#007acc).
     pub const HANDLE: Color = Color::from_rgb(0.0, 0.478, 0.8);
-    /// Notch inner fill.
+    /// Notch inner fill (semi-transparent accent).
     pub const FILLED: Color = Color::from_rgba(0.0, 0.478, 0.8, 0.7);
     /// Handle hovered.
     pub const HANDLE_HOVER: Color = Color::from_rgb(0.2, 0.6, 0.95);
     /// Inner fill hovered.
     pub const FILLED_HOVER: Color = Color::from_rgba(0.2, 0.6, 0.95, 0.8);
-    /// Empty arc track.
-    pub const ARC_EMPTY: Color = Color::from_rgb(0.12, 0.12, 0.12);
-    /// Filled arc (primary).
+    /// Empty arc track (#1e1e1e).
+    pub const ARC_EMPTY: Color = Color::from_rgb(0.118, 0.118, 0.118);
+    /// Filled arc — primary (#007acc).
     pub const ARC_FILLED: Color = Color::from_rgb(0.0, 0.478, 0.8);
-    /// Filled arc (right / bipolar).
+    /// Filled arc — right / bipolar (#0099e6).
     pub const ARC_RIGHT: Color = Color::from_rgb(0.0, 0.6, 0.9);
 }
 
-// --- Circle knob with circular notch (for main controls) ---
+// Circle knob with circular notch
 
 pub struct CircleKnob;
 
