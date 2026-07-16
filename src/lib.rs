@@ -356,7 +356,28 @@ impl Plugin for Oscilla {
                     gui::OscillaGui::view,
                 )
                 .theme(gui::OscillaGui::theme)
-                .subscription(|_| nice_plug_iced::iced::poll_events().map(|_| gui::Message::Poll))
+                .subscription(|_| {
+                    use nice_plug_iced::iced::keyboard::{self, key::Key};
+
+                    let poll = nice_plug_iced::iced::poll_events().map(|_| gui::Message::Poll);
+                    let keys = nice_plug_iced::iced::event::listen().filter_map(|event| {
+                        if let nice_plug_iced::iced::Event::Keyboard(
+                            keyboard::Event::KeyPressed { key, modifiers, .. },
+                        ) = event
+                        {
+                            match key {
+                                Key::Character(c) if c == "a" && modifiers.control() => {
+                                    Some(gui::Message::SelectAll)
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
+                    });
+
+                    nice_plug_iced::iced::Subscription::batch([poll, keys])
+                })
                 .run()
             },
         )

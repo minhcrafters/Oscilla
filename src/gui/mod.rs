@@ -10,6 +10,7 @@ use iced_code_editor::CodeEditor;
 use iced_code_editor::IndentStyle;
 use iced_code_editor::theme;
 use nice_plug::prelude::*;
+use nice_plug_iced::iced::Task;
 use nice_plug_iced::iced::{
     Background, Border, Center, Color, Element, Font, Length, Point, PollSubNotifier, Rectangle,
     Renderer, Shadow, Size, Theme, Vector, border, font,
@@ -200,6 +201,7 @@ pub enum Message {
     Poll,
     EditorEvent(iced_code_editor::Message),
     CompileScript,
+    SelectAll,
 
     VolumeGestured(Gesture),
     AttackGestured(Gesture),
@@ -285,17 +287,9 @@ impl OscillaGui {
         mut editor_state: EditorState<OscillaEditorState>,
         nice_ctx: NiceGuiContext,
     ) -> Self {
-        // DAW restores params AFTER editor() creates OscillaEditorState,
-        // so script_content may still be the default. Sync it now.
-        let saved = editor_state.params.wave_script.borrow().clone();
-        if editor_state.editor_handle.content() != saved {
-            let _ = editor_state.editor_handle.reset(&saved);
-        }
-
         // Configure the code editor to match VS Code Dark+ theme.
         editor_state.editor_handle.set_font(Font::MONOSPACE);
         editor_state.editor_handle.set_font_size(13.0, true);
-        editor_state.editor_handle.set_search_replace_enabled(false);
         editor_state.editor_handle.set_folding_enabled(false);
         editor_state.editor_handle.set_theme(vscode_editor_style());
         editor_state
@@ -326,14 +320,14 @@ impl OscillaGui {
         ))
     }
 
-    pub fn update(&mut self, message: Message) {
+    pub fn update(&mut self, message: Message) -> Task<Message> {
         let setter = self.nice_ctx.param_setter();
         let p = &self.editor_state.params;
         match message {
             Message::Poll => {
                 self.peak_output_db =
                     util::gain_to_db(self.editor_state.peak_output.load(Ordering::Relaxed));
-                // Always check for errors (from background task or audio thread).
+                // Always check for errors
                 if let Some(err) = self.editor_state.compiler.take_last_error() {
                     self.compile_pending = false;
                     self.compile_ok = false;
@@ -344,9 +338,41 @@ impl OscillaGui {
                     self.compile_pending = false;
                     self.status_message = String::from("Compiled");
                 }
+
+                Task::none()
             }
             Message::EditorEvent(event) => {
-                let _ = CodeEditor::update(&mut self.editor_state.editor_handle, &event);
+                CodeEditor::update(&mut self.editor_state.editor_handle, &event)
+                    .map(Message::EditorEvent)
+            }
+            Message::SelectAll => {
+                let editor = &mut self.editor_state.editor_handle;
+                let line_count = editor.content().lines().count();
+
+                let mut task = CodeEditor::update(editor, &iced_code_editor::Message::CtrlHome)
+                    .map(Message::EditorEvent);
+
+                for _ in 0..line_count.saturating_sub(1) {
+                    task = task.chain(
+                        CodeEditor::update(editor, &iced_code_editor::Message::End(true))
+                            .map(Message::EditorEvent),
+                    );
+                    task = task.chain(
+                        CodeEditor::update(
+                            editor,
+                            &iced_code_editor::Message::ArrowKey(
+                                iced_code_editor::ArrowDirection::Down,
+                                true,
+                            ),
+                        )
+                        .map(Message::EditorEvent),
+                    );
+                }
+                // Select to end of last line.
+                task.chain(
+                    CodeEditor::update(editor, &iced_code_editor::Message::End(true))
+                        .map(Message::EditorEvent),
+                )
             }
             Message::CompileScript => {
                 let src = self.editor_state.editor_handle.content();
@@ -364,44 +390,78 @@ impl OscillaGui {
                     source: src,
                     mode,
                 });
+
+                Task::none()
             }
-            Message::VolumeGestured(g) => iced_audio::param::set_nice_param(&p.volume, g, &setter),
-            Message::AttackGestured(g) => iced_audio::param::set_nice_param(&p.attack, g, &setter),
-            Message::DecayGestured(g) => iced_audio::param::set_nice_param(&p.decay, g, &setter),
+            Message::VolumeGestured(g) => {
+                iced_audio::param::set_nice_param(&p.volume, g, &setter);
+
+                Task::none()
+            }
+            Message::AttackGestured(g) => {
+                iced_audio::param::set_nice_param(&p.attack, g, &setter);
+
+                Task::none()
+            }
+            Message::DecayGestured(g) => {
+                iced_audio::param::set_nice_param(&p.decay, g, &setter);
+
+                Task::none()
+            }
             Message::SustainGestured(g) => {
-                iced_audio::param::set_nice_param(&p.sustain, g, &setter)
+                iced_audio::param::set_nice_param(&p.sustain, g, &setter);
+
+                Task::none()
             }
             Message::ReleaseGestured(g) => {
-                iced_audio::param::set_nice_param(&p.release, g, &setter)
+                iced_audio::param::set_nice_param(&p.release, g, &setter);
+
+                Task::none()
             }
             Message::CutoffGestured(g) => {
-                iced_audio::param::set_nice_param(&p.filter_cutoff, g, &setter)
+                iced_audio::param::set_nice_param(&p.filter_cutoff, g, &setter);
+
+                Task::none()
             }
             Message::ResonanceGestured(g) => {
-                iced_audio::param::set_nice_param(&p.filter_resonance, g, &setter)
+                iced_audio::param::set_nice_param(&p.filter_resonance, g, &setter);
+
+                Task::none()
             }
             Message::UnisonVoicesGestured(g) => {
-                iced_audio::param::set_nice_param(&p.unison_voices, g, &setter)
+                iced_audio::param::set_nice_param(&p.unison_voices, g, &setter);
+
+                Task::none()
             }
             Message::DetuneGestured(g) => {
-                iced_audio::param::set_nice_param(&p.detune_cents, g, &setter)
+                iced_audio::param::set_nice_param(&p.detune_cents, g, &setter);
+
+                Task::none()
             }
             Message::WidthGestured(g) => {
-                iced_audio::param::set_nice_param(&p.stereo_width, g, &setter)
+                iced_audio::param::set_nice_param(&p.stereo_width, g, &setter);
+
+                Task::none()
             }
             Message::GlideGestured(g) => {
-                iced_audio::param::set_nice_param(&p.glide_time, g, &setter)
+                iced_audio::param::set_nice_param(&p.glide_time, g, &setter);
+
+                Task::none()
             }
             Message::FilterTypeChanged(ft) => {
                 setter.begin_set_parameter(&p.filter_type);
                 setter.set_parameter_normalized(&p.filter_type, ft as i32 as f32 / 2.0);
                 setter.end_set_parameter(&p.filter_type);
+
+                Task::none()
             }
             Message::ScriptModeChanged(mode) => {
                 let val = mode as i32 as f32 / 1.0;
                 setter.begin_set_parameter(&p.script_mode);
                 setter.set_parameter_normalized(&p.script_mode, val);
                 setter.end_set_parameter(&p.script_mode);
+
+                Task::none()
             }
         }
     }
@@ -497,7 +557,7 @@ impl OscillaGui {
             accent: ACCENT,
         })
         .width(Length::Fill)
-        .height(Length::Fixed(100.0));
+        .height(Length::Fill);
 
         let preview_panel = container(preview)
             .style(|_| section_panel())
@@ -659,15 +719,22 @@ impl OscillaGui {
         // Grid layout
         //
         let left = column![
-            editor_panel,  // fills remaining vertical space
-            preview_panel, // fixed 100 px
+            editor_panel.height(Length::FillPortion(2)),
+            preview_panel.height(Length::FillPortion(1)),
         ]
         .spacing(10)
         .width(Length::FillPortion(3));
 
-        let right = column![envelope, filter, unison, master, footer]
-            .spacing(10)
-            .width(Length::FillPortion(2));
+        let right = column![
+            envelope.height(Length::Fill),
+            filter.height(Length::Fill),
+            unison.height(Length::Fill),
+            master.height(Length::Fill),
+            footer,
+        ]
+        .spacing(10)
+        .width(Length::FillPortion(2))
+        .height(Length::Fill);
 
         container(row![left, right].spacing(12).padding(12))
             .style(|_| container::Style {
