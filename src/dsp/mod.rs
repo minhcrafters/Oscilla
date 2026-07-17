@@ -4,8 +4,9 @@ pub mod voice;
 
 use self::filter::FilterType;
 use self::voice::Voice;
+use crate::script::LuaContext;
 use crate::script::ScriptMode;
-use crate::wavetable::{SharedTimeBuffer, SharedWavetable, WAVETABLE_SIZE};
+use crate::wavetable::{SharedWavetable, WAVETABLE_SIZE};
 use arc_swap::ArcSwap;
 use smallvec::SmallVec;
 
@@ -30,28 +31,6 @@ impl WavetableSlot {
 
     pub fn store(&self, table: SharedWavetable) {
         self.inner.store(table);
-    }
-}
-
-// Lock-free, realtime-safe. Audio thread reads, background thread writes.
-pub struct TimeBufferSlot {
-    inner: ArcSwap<Vec<f32>>,
-}
-
-impl TimeBufferSlot {
-    pub fn new(buf: SharedTimeBuffer) -> Self {
-        Self {
-            inner: ArcSwap::from(buf),
-        }
-    }
-
-    #[inline]
-    pub fn load(&self) -> SharedTimeBuffer {
-        self.inner.load_full()
-    }
-
-    pub fn store(&self, buf: SharedTimeBuffer) {
-        self.inner.store(buf);
     }
 }
 
@@ -103,10 +82,7 @@ impl SynthEngine {
         self.pending.push(NoteCmd::Off { note });
     }
 
-    /// Call once per block after all MIDI events have been queued.
     pub fn process_events(&mut self) {
-        // Collect commands first to end the mutable borrow on self.pending
-        // before calling methods that borrow self again.
         let commands: SmallVec<[NoteCmd; 32]> = self.pending.drain(..).collect();
         for cmd in commands {
             match cmd {
@@ -116,7 +92,6 @@ impl SynthEngine {
         }
     }
 
-    /// Call once per block. Pushes settings to all voices (cheap).
     #[allow(clippy::too_many_arguments)]
     pub fn update_block_params(
         &mut self,
@@ -140,8 +115,6 @@ impl SynthEngine {
         self.stereo_width = width;
         self.glide_time = glide;
 
-        // Push to all voices (including inactive ones so they pick up
-        // settings when they are next triggered).
         for v in self.voices.iter_mut() {
             v.set_filter(cutoff, resonance, filter_type);
             v.set_unison(self.unison_voices, detune, width);
@@ -157,21 +130,17 @@ impl SynthEngine {
         self.volume = vol;
     }
 
-    /// Prefers inactive → finished → oldest by age.
     fn allocate_voice(&mut self) -> Option<usize> {
-        // Prefer completely inactive voices.
         for (i, v) in self.voices.iter().enumerate() {
             if !v.active {
                 return Some(i);
             }
         }
-        // Then prefer finished (released) voices.
         for (i, v) in self.voices.iter().enumerate() {
             if v.finished() {
                 return Some(i);
             }
         }
-        // Steal the oldest voice by age.
         self.voices
             .iter()
             .enumerate()
@@ -203,7 +172,7 @@ impl SynthEngine {
     pub fn process_sample(
         &mut self,
         wavetable: &SharedWavetable,
-        time_buf: &SharedTimeBuffer,
+        time_eval: Option<&LuaContext>,
     ) -> (f32, f32) {
         let mut l = 0.0f32;
         let mut r = 0.0f32;
@@ -219,17 +188,17 @@ impl SynthEngine {
                 }
             }
             ScriptMode::TimeBased => {
-                for v in self.voices.iter_mut() {
-                    let (vl, vr) = v.process_time(time_buf);
-                    l += vl;
-                    r += vr;
+                if let Some(ctx) = time_eval {
+                    for v in self.voices.iter_mut() {
+                        let (vl, vr) = v.process_time(ctx);
+                        l += vl;
+                        r += vr;
+                    }
                 }
             }
         }
 
         let vol = self.volume;
-
-        // Tanh soft-clip: smooth saturation at high amplitudes.
         let l_out = (l * vol).tanh();
         let r_out = (r * vol).tanh();
         (l_out, r_out)

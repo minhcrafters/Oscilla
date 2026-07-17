@@ -22,12 +22,8 @@ pub const WAVETABLE_SIZE: usize = 2048;
 /// A shareable, immutable wavetable.
 pub type SharedWavetable = Arc<Box<[f32; WAVETABLE_SIZE]>>;
 
-/// Duration (in seconds) of time-based audio buffers.
-/// 8 seconds at 48 kHz = 384,000 samples ≈ 1.5 MB.
-pub const TIME_BUFFER_DURATION: f32 = 8.0;
-
-/// A shareable, immutable time-domain audio buffer.
-pub type SharedTimeBuffer = Arc<Vec<f32>>;
+/// Number of samples in the oscilloscope ring buffer.
+pub const SCOPE_SIZE: usize = 512;
 
 /// Default sine-based wavetable.
 pub fn default_wavetable() -> Box<[f32; WAVETABLE_SIZE]> {
@@ -35,18 +31,6 @@ pub fn default_wavetable() -> Box<[f32; WAVETABLE_SIZE]> {
     for (i, s) in data.iter_mut().enumerate() {
         let phase = (i as f32 / WAVETABLE_SIZE as f32) * 2.0 * std::f32::consts::PI;
         *s = phase.sin();
-    }
-    data
-}
-
-/// Default time-based buffer: a 440 Hz sine wave, 8 seconds long.
-/// Generated lazily at the sample rate known at initialization time.
-pub fn default_time_buffer(sample_rate: f32) -> Vec<f32> {
-    let len = (sample_rate * TIME_BUFFER_DURATION) as usize;
-    let mut data = Vec::with_capacity(len);
-    for i in 0..len {
-        let t = i as f32 / sample_rate;
-        data.push((t * 440.0 * 2.0 * std::f32::consts::PI).sin());
     }
     data
 }

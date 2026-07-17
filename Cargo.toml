@@ -15,8 +15,7 @@ nice-plug = { version = "0.1", features = ["standalone"] }
 nice-plug-iced = { version = "0.1", features = ["canvas", "image"] }
 iced_audio = { version = "0.14", features = ["nice-plug"] }
 iced-code-editor = "0.3"
-rhai = { version = "1.25", features = ["sync"] }
-rayon = "1"
+mlua = { version = "0.12", features = ["luajit", "vendored"] }
 realfft = "3.5"
 rustfft = "6"
 arc-swap = "1"

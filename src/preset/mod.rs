@@ -7,7 +7,7 @@
 //! Example:
 //! ```text
 //! name "Warm Pad"
-//! wave { sin(x) + sin(x*2)*0.5 + sin(x*4)*0.25 }
+//! wave { math.sin(x) + math.sin(x*2)*0.5 + math.sin(x*4)*0.25 }
 //! filter { cutoff 1200 resonance 0.3 type lp }
 //! envelope { attack 0.05 decay 0.4 sustain 0.7 release 1.2 }
 //! unison { voices 3 detune 8 width 0.6 }
@@ -40,7 +40,7 @@ impl Default for Preset {
     fn default() -> Self {
         Self {
             name: "Init".into(),
-            wave_script: "sin(x)".into(),
+            wave_script: "math.sin(x)".into(),
             filter_type: FilterType::LowPass,
             filter_cutoff: 20000.0, // wide open
             filter_resonance: 0.0,
@@ -343,7 +343,7 @@ mod tests {
     fn test_parse_default_preset() {
         let source = r#"
             name "Test"
-            wave { sin(x) + sin(x*3)*0.25 }
+            wave { math.sin(x) + math.sin(x*3)*0.25 }
             filter { cutoff 800 resonance 0.5 type lp }
             envelope { attack 0.01 decay 0.2 sustain 0.7 release 0.4 }
             unison { voices 2 detune 10 width 0.5 }
@@ -352,7 +352,7 @@ mod tests {
         "#;
         let preset = Preset::parse(source).unwrap();
         assert_eq!(preset.name, "Test");
-        assert_eq!(preset.wave_script, "sin(x) + sin(x*3)*0.25");
+        assert_eq!(preset.wave_script, "math.sin(x) + math.sin(x*3)*0.25");
         assert_eq!(preset.filter_cutoff, 800.0);
         assert_eq!(preset.unison_voices, 2);
         assert_eq!(preset.volume, 0.8);

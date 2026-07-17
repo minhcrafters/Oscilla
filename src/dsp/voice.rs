@@ -1,5 +1,6 @@
 use super::envelope::Adsr;
 use super::filter::{FilterType, Svf};
+use crate::script::LuaContext;
 
 pub const MAX_UNISON: usize = 7;
 
@@ -28,7 +29,6 @@ pub struct Voice {
     pub unison_detunes: [f32; MAX_UNISON],
     pub unison_pans: [f32; MAX_UNISON],
     pub time_elapsed: f32,
-    pub time_buf_pos: f32,
     pub sample_rate: f32,
 }
 
@@ -49,9 +49,7 @@ impl Voice {
             unison_phases: [0.0; MAX_UNISON],
             unison_detunes: [1.0; MAX_UNISON],
             unison_pans: [0.0; MAX_UNISON],
-
             time_elapsed: 0.0,
-            time_buf_pos: 0.0,
             sample_rate,
         }
     }
@@ -68,11 +66,9 @@ impl Voice {
         self.velocity = vel;
 
         if self.active && glide < 0.001 {
-            // No glide: instant note change while keeping phase continuity.
             self.inc_target = target_inc;
-            self.glide_rate = 1.0; // instant
+            self.glide_rate = 1.0;
         } else if !self.active || glide < 0.001 {
-            // First note or no glide.
             self.inc = target_inc;
             self.inc_target = target_inc;
             self.glide_rate = 1.0;
@@ -80,19 +76,16 @@ impl Voice {
             self.cur_velocity = vel;
             self.env.note_on();
         } else {
-            // Glide from current note.
             self.inc_target = target_inc;
-            // glide_rate: samples to reach target. Lower = slower.
             let samples = (glide * sr).max(1.0);
             self.glide_rate = 1.0 - (1.0 / samples).min(0.999);
-            self.cur_velocity = self.velocity.min(vel); // fade toward new velocity
+            self.cur_velocity = self.velocity.min(vel);
             self.env.note_on();
         }
 
         self.active = true;
         self.age = 0;
         self.time_elapsed = 0.0;
-        self.time_buf_pos = 0.0;
     }
 
     #[inline]
@@ -121,7 +114,6 @@ impl Voice {
                 self.unison_detunes[i] = 1.0;
                 self.unison_pans[i] = 0.0;
             } else {
-                // Evenly space detune across voices.
                 let t = if n == 1 {
                     0.0
                 } else {
@@ -131,7 +123,6 @@ impl Voice {
                 self.unison_pans[i] = t * width;
             }
         }
-        // Fill remaining with identity.
         for i in n..MAX_UNISON {
             self.unison_detunes[i] = 1.0;
             self.unison_pans[i] = 0.0;
@@ -148,7 +139,6 @@ impl Voice {
             return (0.0, 0.0);
         }
 
-        // Glide toward target increment.
         if (self.inc_target - self.inc).abs() > 0.0001 {
             self.inc = self.inc * self.glide_rate + self.inc_target * (1.0 - self.glide_rate);
         }
@@ -158,7 +148,6 @@ impl Voice {
         let mut right = 0.0f32;
 
         for i in 0..n_voices {
-            // Accumulate phase with correct wraparound (handles negatives too).
             self.unison_phases[i] += self.inc * self.unison_detunes[i];
             let wt_size = crate::wavetable::WAVETABLE_SIZE as f32;
             if self.unison_phases[i] >= wt_size {
@@ -169,7 +158,6 @@ impl Voice {
 
             let sample = lerp_wave(table, self.unison_phases[i]);
 
-            // Stereo pan.
             let pan = self.unison_pans[i];
             let gain_l = ((1.0 - pan) * 0.5).sqrt();
             let gain_r = ((1.0 + pan) * 0.5).sqrt();
@@ -178,26 +166,18 @@ impl Voice {
             right += sample * gain_r;
         }
 
-        // Scale by number of voices (power-preserving).
         let norm = 1.0 / (n_voices as f32).sqrt();
         left *= norm;
         right *= norm;
 
-        // Apply envelope and velocity.
         let env_val = self.env.tick();
-        let vel = self.cur_velocity;
-        let amp = env_val * vel * vel; // velocity squared for musical feel
+        let amp = env_val * self.cur_velocity * self.cur_velocity;
 
         left *= amp;
         right *= amp;
 
-        // Apply per-voice filter via mid/side to avoid double-feedback.
         (left, right) = self.filt.process_stereo(left, right);
 
-        // Hard output clamp — last-resort safety net.
-        // A well-behaved filter should never reach ±4.0, but if it does
-        // (e.g. during a rapid cutoff sweep) this prevents DAW clipping
-        // or speaker damage.
         left = left.clamp(-4.0, 4.0);
         right = right.clamp(-4.0, 4.0);
 
@@ -211,57 +191,32 @@ impl Voice {
         (left, right)
     }
 
-    /// Reads time-domain buffer at a rate proportional to note frequency (1× at A4).
+    /// Real-time time-based synthesis using LuaJIT.
+    /// Evaluates `f(t * pitch_ratio)` per sample.
     #[inline]
-    pub fn process_time(&mut self, time_buf: &[f32]) -> (f32, f32) {
-        if !self.active || time_buf.is_empty() {
+    pub fn process_time(&mut self, ctx: &LuaContext) -> (f32, f32) {
+        if !self.active {
             return (0.0, 0.0);
         }
 
-        // Glide toward target increment.
         if (self.inc_target - self.inc).abs() > 0.0001 {
             self.inc = self.inc * self.glide_rate + self.inc_target * (1.0 - self.glide_rate);
         }
 
-        // Compute the read-rate multiplier.
-        // At A4 (note 69, 440 Hz), the wavetable increment is:
-        //   inc = 440 * wavetable_size / sample_rate
-        // For time-based, we want advance = 1.0 sample per sample at A4.
-        // So: advance_per_sample = inc / inc_at_A4
-        let inc_a4 = Voice::note_to_inc(69, self.sample_rate);
-        let advance = if inc_a4 > 0.0 { self.inc / inc_a4 } else { 1.0 };
+        let pitch_ratio = (2.0f32).powf((self.note as f32 - 69.0) / 12.0);
+        let effective_t = self.time_elapsed * pitch_ratio;
 
-        self.time_buf_pos += advance;
-        let buf_len = time_buf.len() as f32;
+        let sample = ctx.eval_t(effective_t);
 
-        // Wrap around for looping.
-        while self.time_buf_pos >= buf_len {
-            self.time_buf_pos -= buf_len;
-        }
-        while self.time_buf_pos < 0.0 {
-            self.time_buf_pos += buf_len;
-        }
-
-        // Linear interpolation.
-        let idx = self.time_buf_pos as usize;
-        let frac = self.time_buf_pos - idx as f32;
-        let a = time_buf[idx];
-        let b = time_buf[(idx + 1) % time_buf.len()];
-        let sample = a + (b - a) * frac;
-
-        // Stereo pan (center only — unison doesn't apply in time-based mode).
         let mut left = sample;
         let mut right = sample;
 
-        // Apply envelope and velocity.
         let env_val = self.env.tick();
-        let vel = self.cur_velocity;
-        let amp = env_val * vel * vel;
+        let amp = env_val * self.cur_velocity * self.cur_velocity;
 
         left *= amp;
         right *= amp;
 
-        // Apply per-voice filter.
         (left, right) = self.filt.process_stereo(left, right);
 
         left = left.clamp(-4.0, 4.0);

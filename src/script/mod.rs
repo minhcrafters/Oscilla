@@ -1,4 +1,4 @@
-//! Rhai-based scripting engine for Oscilla.
+//! LuaJIT-based scripting engine for Oscilla.
 //!
 //! Users write a small "shader for sound" that defines a waveform function.
 //!
@@ -11,28 +11,25 @@
 //!
 //! **Time-based mode** (`t` variable):
 //! The script maps elapsed time `t` (seconds since note-on) to an
-//! amplitude value.  A long time-domain buffer is pre-rendered and
-//! played back with pitch-shifting via rate adjustment.
+//! amplitude value.  The expression is evaluated per-sample in the
+//! audio callback using LuaJIT's trace compiler for near-native speed.
 //!
-//! The engine exposes DSP-friendly math functions:
-//! `sin`, `cos`, `saw`, `square`, `triangle`, `noise`, `fold`, `clip`, `tanh`,
-//! `abs`, `pow`, `log`, `exp`, `floor`, `ceil`, `round`, `fract`.
+//! The engine exposes DSP-friendly functions in two modules:
+//! - `math.*` — standard math: `sin`, `cos`, `exp`, `pi`, etc.
+//! - `dsp.*` — custom waveshaping: `saw`, `square`, `triangle`, `noise`, `fold`, `clip`, `lerp`, `rand`
 //!
 //! Example patches (wavetable mode):
-//! - `sin(x) + sin(x*3)*0.25`
-//! - `tanh(saw(x) + noise(x)*0.05)`
-//! - `fold(sin(x*2), 0.5)`
+//! - `math.sin(x) + math.sin(x*3)*0.25`
+//! - `math.tanh(dsp.saw(x) + dsp.noise(x)*0.05)`
+//! - `dsp.fold(math.sin(x*2), 0.5)`
 //!
 //! Example patches (time-based mode):
-//! - `sin(t * pi * 2 * 440)`           — 440 Hz sine
-//! - `sin(t * pi * 2 * 55) * sin(t * pi * 2 * 66)` — ring-mod bell
-//! - `sin(t * pi * 2 * 220) * exp(-t * 3)` — percussive pluck
+//! - `math.sin(t * math.pi * 2 * 440)`           — 440 Hz sine
+//! - `math.sin(t * math.pi * 2 * 55) * math.sin(t * math.pi * 2 * 66)` — ring-mod bell
+//! - `math.sin(t * math.pi * 2 * 220) * math.exp(-t * 3)` — percussive pluck
 //!
 
-use rayon::prelude::*;
-use rhai::{AST, Dynamic, Engine, Module, Scope};
-use rhai::{Array, INT};
-use std::sync::Arc;
+use mlua::{Function, Lua, Value, Variadic};
 use std::sync::Mutex;
 
 /// Which variable the script is a function of.
@@ -40,7 +37,7 @@ use std::sync::Mutex;
 pub enum ScriptMode {
     /// Script uses `x` (phase 0..2pi); output is a single-cycle wavetable.
     Wavetable,
-    /// Script uses `t` (seconds since note-on); output is a time-domain buffer.
+    /// Script uses `t` (seconds since note-on); output is real-time evaluated.
     TimeBased,
 }
 
@@ -53,47 +50,40 @@ impl std::fmt::Display for ScriptMode {
     }
 }
 
-// DSP primitives
+// DSP primitives (pure Rust, registered into Lua as globals)
 
-/// Simple pseudo-random function based on phase for deterministic "noise".
 fn phase_noise(x: f32) -> f32 {
     let n = (x.sin() * 43_758.547).fract();
     n * 2.0 - 1.0
 }
 
-/// Sawtooth wave: maps phase 0..2pi to -1..1.
 fn saw(x: f32) -> f32 {
     let t = x / (2.0 * std::f32::consts::PI);
     2.0 * (t - (t + 0.5).floor())
 }
 
-/// Square wave with explicit pulse-width.
-fn square(x: f32, pw: f32) -> f32 {
+fn square_default(x: f32) -> f32 {
     let t = x / (2.0 * std::f32::consts::PI);
-    let frac = t.fract();
-    if frac < pw.clamp(0.01, 0.99) {
+    if t.fract() < 0.5 { 1.0 } else { -1.0 }
+}
+
+fn square_pw(x: f32, pw: f32) -> f32 {
+    let t = x / (2.0 * std::f32::consts::PI);
+    if t.fract() < pw.clamp(0.01, 0.99) {
         1.0
     } else {
         -1.0
     }
 }
 
-/// Square wave (default 50% duty cycle).
-fn square_default(x: f32) -> f32 {
-    square(x, 0.5)
-}
-
-/// Triangle wave.
 fn triangle(x: f32) -> f32 {
     let t = x / (2.0 * std::f32::consts::PI);
     4.0 * (t - (t + 0.75).floor() + 0.25).abs() - 1.0
 }
 
-/// Wavefolding distortion.
 fn fold(x: f32, threshold: f32) -> f32 {
     let t = threshold.max(0.001);
     let mut y = x;
-    // Limit iterations to prevent infinite loops on pathological inputs.
     for _ in 0..64 {
         if y > t {
             y = 2.0 * t - y;
@@ -106,267 +96,188 @@ fn fold(x: f32, threshold: f32) -> f32 {
     y
 }
 
-/// Hard clipping.
 fn clip(x: f32, level: f32) -> f32 {
     x.clamp(-level, level)
 }
 
-/// Linear interpolation between values.
-fn lerp(values: Array, t: f32) -> f32 {
-    if values.is_empty() {
-        return 0.0;
+fn lerp(args: Variadic<f32>) -> f32 {
+    let n = args.len();
+    if n < 2 {
+        return args.first().copied().unwrap_or(0.0);
     }
-
-    let pos = t.clamp(0.0, 1.0) * (values.len() - 1) as f32;
-
-    let index = pos.floor() as usize;
-    let frac = pos - index as f32;
-
-    let get = |v: &Dynamic| -> f32 {
-        v.clone()
-            .try_cast::<f32>()
-            .or_else(|| v.clone().try_cast::<f64>().map(|f| f as f32))
-            .or_else(|| v.clone().try_cast::<INT>().map(|i| i as f32))
-            .unwrap_or(0.0)
-    };
-
-    if index >= values.len() - 1 {
-        return get(&values[index]);
-    }
-
-    let a = get(&values[index]);
-    let b = get(&values[index + 1]);
-
-    a + (b - a) * frac
+    let t_idx = n - 1;
+    let t = args[t_idx].clamp(0.0, 1.0);
+    let pos = t * (t_idx as f32);
+    let idx = (pos.floor() as usize).min(t_idx.saturating_sub(1));
+    let frac = pos - idx as f32;
+    args[idx] + (args[idx + 1] - args[idx]) * frac
 }
 
-fn as_f32(v: rhai::Dynamic) -> Result<f32, Box<rhai::EvalAltResult>> {
-    if let Some(f) = v.clone().try_cast::<f32>() {
-        Ok(f)
-    } else if let Some(f) = v.clone().try_cast::<f64>() {
-        Ok(f as f32)
-    } else if let Some(i) = v.clone().try_cast::<rhai::INT>() {
-        Ok(i as f32)
+/// Register custom oscillator DSP functions as a `dsp` Lua module.
+/// User scripts access them via `dsp.saw(x)`, etc.
+fn register_dsp_table(lua: &Lua) -> mlua::Result<()> {
+    let dsp = lua.create_table()?;
+
+    dsp.set("saw", lua.create_function(|_, x: f32| Ok(saw(x)))?)?;
+    dsp.set(
+        "square",
+        lua.create_function(|_, args: Variadic<f32>| {
+            if args.len() == 1 {
+                Ok(square_default(args[0]))
+            } else {
+                Ok(square_pw(args[0], args[1]))
+            }
+        })?,
+    )?;
+    dsp.set(
+        "triangle",
+        lua.create_function(|_, x: f32| Ok(triangle(x)))?,
+    )?;
+    dsp.set(
+        "noise",
+        lua.create_function(|_, x: f32| Ok(phase_noise(x)))?,
+    )?;
+    dsp.set(
+        "fold",
+        lua.create_function(|_, (x, t): (f32, f32)| Ok(fold(x, t)))?,
+    )?;
+    dsp.set(
+        "clip",
+        lua.create_function(|_, (x, l): (f32, f32)| Ok(clip(x, l)))?,
+    )?;
+
+    lua.globals().set("dsp", dsp)?;
+    Ok(())
+}
+
+/// Compile a user script — validates that the expression parses.
+/// Returns Ok(()) if the script is valid Lua.
+pub fn validate_script(source: &str) -> Result<(), String> {
+    let lua = Lua::new();
+    register_dsp_table(&lua).map_err(|e| format!("Init error: {e}"))?;
+    register_math_table(&lua).map_err(|e| format!("Init error: {e}"))?;
+
+    let wrapped = wrap_script(source, "x");
+    lua.load(&wrapped)
+        .eval::<Value>()
+        .map_err(|e| format!("Compilation error: {e}"))?;
+
+    Ok(())
+}
+
+/// Wrap user source into a callable Lua function.
+///
+/// Simple one-liners like `math.sin(x)` are wrapped as `return <expr>`.
+/// Multi-line scripts with `local`, explicit `return`, or newlines
+/// are used as the raw function body.
+fn wrap_script(source: &str, var: &str) -> String {
+    let trimmed = source.trim();
+    let is_multi =
+        trimmed.contains('\n') || trimmed.starts_with("local") || trimmed.starts_with("return");
+
+    if is_multi {
+        format!("return function({var})\n{source}\nend")
     } else {
-        Err(format!("Expected a number, got {}", v.type_name()).into())
+        format!("return function({var})\nreturn {source}\nend")
     }
 }
 
-// Script engine
+/// Register `math.sin`, `math.pi`, etc. as a `math` global table.
+fn register_math_table(lua: &Lua) -> mlua::Result<()> {
+    let math = lua.create_table()?;
+    math.set("pi", std::f32::consts::PI)?;
+    math.set("tau", std::f32::consts::TAU)?;
+    math.set("e", std::f32::consts::E)?;
 
-/// Script engine that compiles and evaluates Oscilla waveform scripts.
-pub struct ScriptEngine {
-    engine: Engine,
-    ast: AST,
-    /// Which mode this engine was compiled for.
-    pub mode: ScriptMode,
+    macro_rules! mfn {
+        ($name:expr, $func:expr) => {
+            math.set($name, lua.create_function(|_, x: f32| Ok($func(x)))?)?;
+        };
+    }
+    mfn!("sin", f32::sin);
+    mfn!("cos", f32::cos);
+    mfn!("tan", f32::tan);
+    mfn!("tanh", f32::tanh);
+    mfn!("abs", f32::abs);
+    mfn!("exp", f32::exp);
+    mfn!("sqrt", f32::sqrt);
+    mfn!("floor", f32::floor);
+    mfn!("ceil", f32::ceil);
+    mfn!("round", f32::round);
+    math.set("fract", lua.create_function(|_, x: f32| Ok(x.fract()))?)?;
+    math.set("log", lua.create_function(|_, x: f32| Ok(x.ln()))?)?;
+    math.set("log10", lua.create_function(|_, x: f32| Ok(x.log10()))?)?;
+
+    math.set(
+        "lerp",
+        lua.create_function(|_, args: Variadic<f32>| Ok(lerp(args)))?,
+    )?;
+    math.set(
+        "rand",
+        lua.create_function(|_, ()| Ok(rand::random::<f32>()))?,
+    )?;
+
+    lua.globals().set("math", math)?;
+    Ok(())
 }
 
-impl ScriptEngine {
-    /// Compile a user script into an evaluable function.
-    ///
-    /// The script should be an expression (or series of expressions) that
-    /// evaluates to a float value representing the waveform amplitude.
-    ///
-    /// In wavetable mode the variable `x` (phase 0..2π) is available;
-    /// in time-based mode the variable `t` (seconds) is available.
-    ///
-    /// Integer and float literals can be freely mixed: `sin(x*3)*0.25` works
-    /// exactly as users expect.
+/// A live Lua context holding a compiled function ready for per-sample calls.
+///
+/// Created on the audio thread when a new script needs to be evaluated.
+pub struct LuaContext {
+    #[allow(dead_code)]
+    lua: Lua,
+    func: Function,
+    #[allow(dead_code)]
+    mode: ScriptMode,
+}
+
+impl LuaContext {
+    /// Compile a user script into a callable Lua function.
     pub fn compile(source: &str, mode: ScriptMode) -> Result<Self, String> {
-        let mut engine = Engine::new();
+        let lua = Lua::new();
+        register_dsp_table(&lua).map_err(|e| format!("Init error: {e}"))?;
+        register_math_table(&lua).map_err(|e| format!("Init error: {e}"))?;
 
-        // Register DSP / waveshaping functions
-        // We use rhai::Dynamic to seamlessly accept f32, f64, or INT
-        // and avoid missing function signatures.
-
-        engine.register_fn(
-            "saw",
-            |x: rhai::Dynamic| -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
-                Ok(rhai::Dynamic::from(saw(as_f32(x)?)))
-            },
-        );
-
-        engine.register_fn(
-            "square",
-            |x: rhai::Dynamic| -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
-                Ok(rhai::Dynamic::from(square_default(as_f32(x)?)))
-            },
-        );
-        engine.register_fn(
-            "square",
-            |x: rhai::Dynamic,
-             pw: rhai::Dynamic|
-             -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
-                Ok(rhai::Dynamic::from(square(as_f32(x)?, as_f32(pw)?)))
-            },
-        );
-
-        engine.register_fn(
-            "triangle",
-            |x: rhai::Dynamic| -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
-                Ok(rhai::Dynamic::from(triangle(as_f32(x)?)))
-            },
-        );
-
-        engine.register_fn(
-            "noise",
-            |x: rhai::Dynamic| -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
-                Ok(rhai::Dynamic::from(phase_noise(as_f32(x)?)))
-            },
-        );
-
-        engine.register_fn(
-            "fold",
-            |x: rhai::Dynamic,
-             t: rhai::Dynamic|
-             -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
-                Ok(rhai::Dynamic::from(fold(as_f32(x)?, as_f32(t)?)))
-            },
-        );
-
-        engine.register_fn(
-            "clip",
-            |x: rhai::Dynamic,
-             l: rhai::Dynamic|
-             -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
-                Ok(rhai::Dynamic::from(clip(as_f32(x)?, as_f32(l)?)))
-            },
-        );
-
-        engine.register_fn(
-            "lerp",
-            |values: rhai::Array,
-             t: rhai::Dynamic|
-             -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
-                Ok(rhai::Dynamic::from(lerp(values, as_f32(t)?)))
-            },
-        );
-
-        engine.register_fn(
-            "rand",
-            || -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
-                Ok(rhai::Dynamic::from(rand::random::<f32>()))
-            },
-        );
-
-        // Core math
-        macro_rules! reg_math {
-            ($name:expr, $func:expr) => {
-                engine.register_fn(
-                    $name,
-                    |x: rhai::Dynamic| -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
-                        let f = as_f32(x)?;
-                        Ok(rhai::Dynamic::from($func(f)))
-                    },
-                );
-            };
-        }
-        reg_math!("sin", |x: f32| x.sin());
-        reg_math!("cos", |x: f32| x.cos());
-        reg_math!("tan", |x: f32| x.tan());
-        reg_math!("tanh", |x: f32| x.tanh());
-        reg_math!("abs", |x: f32| x.abs());
-        reg_math!("log", |x: f32| x.ln());
-        reg_math!("log10", |x: f32| x.log10());
-        reg_math!("exp", |x: f32| x.exp());
-        reg_math!("sqrt", |x: f32| x.sqrt());
-        reg_math!("floor", |x: f32| x.floor());
-        reg_math!("ceil", |x: f32| x.ceil());
-        reg_math!("round", |x: f32| x.round());
-        reg_math!("fract", |x: f32| x.fract());
-
-        // Arithmetic fallback operators
-        engine.register_fn(
-            "+",
-            |a: rhai::Dynamic,
-             b: rhai::Dynamic|
-             -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
-                Ok(rhai::Dynamic::from(as_f32(a)? + as_f32(b)?))
-            },
-        );
-        engine.register_fn(
-            "-",
-            |a: rhai::Dynamic,
-             b: rhai::Dynamic|
-             -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
-                Ok(rhai::Dynamic::from(as_f32(a)? - as_f32(b)?))
-            },
-        );
-        engine.register_fn(
-            "*",
-            |a: rhai::Dynamic,
-             b: rhai::Dynamic|
-             -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
-                Ok(rhai::Dynamic::from(as_f32(a)? * as_f32(b)?))
-            },
-        );
-        engine.register_fn(
-            "/",
-            |a: rhai::Dynamic,
-             b: rhai::Dynamic|
-             -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
-                Ok(rhai::Dynamic::from(as_f32(a)? / as_f32(b)?))
-            },
-        );
-
-        let mut math = Module::new();
-
-        math.set_var("pi", std::f32::consts::PI);
-        math.set_var("tau", std::f32::consts::TAU);
-        math.set_var("e", std::f32::consts::E);
-
-        engine.register_global_module(Arc::new(math));
-
-        let ast = engine
-            .compile(source)
-            .map_err(|e| format!("Compilation error: {e}"))?;
-
-        Ok(Self { engine, ast, mode })
-    }
-
-    /// Evaluate the compiled script at a given phase `x` (0..2π) and time `t`
-    /// (elapsed seconds since note-on).
-    ///
-    /// Both `x` and `t` are always bound so scripts can freely reference
-    /// either variable regardless of mode.
-    pub fn evaluate(&self, x: f32, t: f32) -> Result<f32, String> {
-        let mut scope = Scope::new();
-        scope.push("x", x);
-        scope.push("t", t);
-
-        let dyn_val = self
-            .engine
-            .eval_ast_with_scope::<rhai::Dynamic>(&mut scope, &self.ast)
-            .map_err(|e| format!("Evaluation error: {e}"))?;
-
-        let result = if let Some(v) = dyn_val.clone().try_cast::<f32>() {
-            v
-        } else if let Some(v) = dyn_val.clone().try_cast::<f64>() {
-            v as f32
-        } else if let Some(v) = dyn_val.clone().try_cast::<INT>() {
-            v as f32
-        } else {
-            return Err(format!(
-                "Script returned non-numeric type: {}",
-                dyn_val.type_name()
-            ));
+        let var = match mode {
+            ScriptMode::Wavetable => "x",
+            ScriptMode::TimeBased => "t",
         };
 
-        // Clamp to reasonable range to avoid extreme values.
-        Ok(result.clamp(-100.0, 100.0))
+        let wrapped = wrap_script(source, var);
+
+        let func: Function = lua
+            .load(&wrapped)
+            .eval()
+            .map_err(|e| format!("Compilation error: {e}"))?;
+
+        Ok(Self { lua, func, mode })
+    }
+
+    /// Evaluate the function at phase `x`.
+    #[inline]
+    pub fn eval_x(&self, x: f32) -> f32 {
+        self.func.call::<f32>((x,)).unwrap_or(0.0)
+    }
+
+    /// Evaluate the function at time `t`.
+    #[inline]
+    pub fn eval_t(&self, t: f32) -> f32 {
+        self.func.call::<f32>((t,)).unwrap_or(0.0)
     }
 }
-
-// Compiler wrapper
 
 /// Thread-safe wrapper for deferred compilation.
 ///
-/// The actual compilation and wavetable/time-buffer generation is done
-/// on a background thread, never on the audio callback.
+/// Compilation happens on a background thread (via the task executor).
+/// The compiled source and mode are stored here; the audio thread creates
+/// a live `LuaContext` from them when it's time to evaluate.
 pub struct ScriptCompiler {
-    engine: Mutex<Option<Arc<ScriptEngine>>>,
-    /// Last compilation or buffer-generation error, for GUI display.
+    /// The last successfully compiled source code.
+    compiled_source: Mutex<Option<String>>,
+    /// The mode the source was compiled for.
+    mode: Mutex<Option<ScriptMode>>,
+    /// Last error message, for GUI display.
     last_error: Mutex<Option<String>>,
 }
 
@@ -379,333 +290,145 @@ impl Default for ScriptCompiler {
 impl ScriptCompiler {
     pub fn new() -> Self {
         Self {
-            engine: Mutex::new(None),
+            compiled_source: Mutex::new(None),
+            mode: Mutex::new(None),
             last_error: Mutex::new(None),
         }
     }
 
-    /// Return the mode of the currently compiled script (if any).
     pub fn current_mode(&self) -> Option<ScriptMode> {
-        let guard = self.engine.lock().unwrap();
-        guard.as_ref().map(|e| e.mode)
+        *self.mode.lock().unwrap()
     }
 
-    /// Store an error message for the GUI to pick up.
     pub fn store_error(&self, msg: String) {
         *self.last_error.lock().unwrap() = Some(msg);
     }
 
-    /// Take and clear the last error message, if any.
     pub fn take_last_error(&self) -> Option<String> {
         self.last_error.lock().unwrap().take()
     }
 
-    /// Compile a script and store the engine. Returns Ok on success.
-    /// On success clears any stored error.
+    /// Compile a script (validate it). Returns Ok on success.
     pub fn compile(&self, source: &str, mode: ScriptMode) -> Result<(), String> {
-        let engine = ScriptEngine::compile(source, mode)?;
-        let mut guard = self.engine.lock().unwrap();
-        *guard = Some(Arc::new(engine));
-        drop(guard);
-        // Clear any stale error on successful compile.
+        validate_script(source)?;
+        *self.compiled_source.lock().unwrap() = Some(source.to_string());
+        *self.mode.lock().unwrap() = Some(mode);
         self.last_error.lock().unwrap().take();
         Ok(())
     }
 
-    // Wavetable generation
-
-    /// Sample the compiled waveform function into a wavetable.
-    ///
-    /// Returns the shared wavetable ready for the audio thread.
-    pub fn generate_wavetable(&self) -> Result<crate::wavetable::SharedWavetable, String> {
-        self.generate_wavetable_at(0.0)
+    /// Return the last compiled source (if any) for the audio thread
+    /// to create a live `LuaContext` from.
+    pub fn get_source(&self) -> Option<String> {
+        self.compiled_source.lock().unwrap().clone()
     }
 
-    /// Sample the compiled waveform function into a wavetable at a specific
-    /// time offset `t` (in seconds).
-    pub fn generate_wavetable_at(
-        &self,
-        t: f32,
-    ) -> Result<crate::wavetable::SharedWavetable, String> {
-        let engine_arc = {
-            let guard = self.engine.lock().unwrap();
-            guard.as_ref().ok_or("No script compiled")?.clone()
-        };
-
-        let inv_n = 1.0 / crate::wavetable::WAVETABLE_SIZE as f32;
-        let mut scope = Scope::new();
-        let mut first_err: Option<String> = None;
-        let mut data = Box::new([0.0f32; crate::wavetable::WAVETABLE_SIZE]);
-
-        for (i, sample) in data.iter_mut().enumerate() {
-            let x = i as f32 * inv_n * 2.0 * std::f32::consts::PI;
-            scope.set_or_push("x", x);
-            scope.set_or_push("t", t);
-            *sample = match engine_arc
-                .engine
-                .eval_ast_with_scope::<Dynamic>(&mut scope, &engine_arc.ast)
-            {
-                Ok(v) => Self::dynamic_to_f32(v),
-                Err(e) => {
-                    if first_err.is_none() {
-                        first_err = Some(e.to_string());
-                    }
-                    0.0
-                }
-            };
-        }
-
-        if let Some(err) = first_err {
-            return Err(format!("Evaluation error: {err}"));
-        }
-
-        crate::wavetable::remove_dc(&mut data);
-        crate::wavetable::normalize(&mut data);
-        crate::wavetable::band_limit(&mut data, 200);
-        crate::wavetable::normalize(&mut data);
-
-        Ok(Arc::new(data))
-    }
-
-    // Time-buffer generation
-
-    /// Extract an f32 from a Rhai Dynamic value without allocating a Result.
-    #[inline]
-    fn dynamic_to_f32(v: Dynamic) -> f32 {
-        if let Some(f) = v.clone().try_cast::<f32>() {
-            return f;
-        }
-        if let Some(f) = v.clone().try_cast::<f64>() {
-            return f as f32;
-        }
-        if let Some(i) = v.clone().try_cast::<INT>() {
-            return i as f32;
-        }
-        0.0
-    }
-
-    /// Generate a time-domain buffer by evaluating the script at regular
-    /// time intervals, using parallel evaluation for speed.
-    ///
-    /// The buffer represents `buf_duration_secs` of audio at `sample_rate`.
-    /// During playback each voice reads from this buffer with its read
-    /// pointer advancing at a rate proportional to the note frequency
-    /// (1× at A4 = 440 Hz), which gives pitch-shifted time-based synthesis.
-    pub fn generate_time_buffer(
-        &self,
-        sample_rate: f32,
-        buf_duration_secs: f32,
-    ) -> Result<crate::wavetable::SharedTimeBuffer, String> {
-        let engine_arc = {
-            let guard = self.engine.lock().unwrap();
-            guard.as_ref().ok_or("No script compiled")?.clone()
-        };
-
-        let len = (sample_rate * buf_duration_secs) as usize;
-        let inv_sr = 1.0 / sample_rate;
-        let mut data: Vec<f32> = vec![0.0; len];
-
-        // Chunk size balances parallelism overhead against cache efficiency.
-        let num_threads = rayon::current_num_threads();
-        let chunk_size = len.div_ceil(num_threads).max(4096);
-
-        let first_err: Mutex<Option<String>> = Mutex::new(None);
-
-        data.par_chunks_mut(chunk_size)
-            .enumerate()
-            .for_each(|(chunk_idx, chunk)| {
-                let base = chunk_idx * chunk_size;
-                let mut scope = Scope::new();
-
-                for (j, sample) in chunk.iter_mut().enumerate() {
-                    let t = (base + j) as f32 * inv_sr;
-
-                    scope.set_or_push("x", 0.0_f32);
-                    scope.set_or_push("t", t);
-
-                    *sample = match engine_arc
-                        .engine
-                        .eval_ast_with_scope::<Dynamic>(&mut scope, &engine_arc.ast)
-                    {
-                        Ok(v) => Self::dynamic_to_f32(v).clamp(-4.0, 4.0),
-                        Err(e) => {
-                            let mut guard = first_err.lock().unwrap();
-                            if guard.is_none() {
-                                *guard = Some(e.to_string());
-                            }
-                            0.0
-                        }
-                    };
-                }
-            });
-
-        if let Some(err) = first_err.into_inner().unwrap() {
-            return Err(format!("Evaluation error: {err}"));
-        }
-
-        // Normalize the time buffer (peak = 1.0).
-        let peak = data.iter().fold(0.0f32, |acc, &s| acc.max(s.abs()));
-        if peak > 1e-10 {
-            let scale = 1.0 / peak;
-            for s in data.iter_mut() {
-                *s *= scale;
-            }
-        }
-
-        Ok(Arc::new(data))
-    }
-
-    /// Convenience: generate both wavetable and time buffer at once.
-    /// Returns `(wavetable, time_buffer)`.
-    pub fn generate_both(
-        &self,
-        mode: ScriptMode,
-        sample_rate: f32,
-    ) -> Result<
-        (
-            Option<crate::wavetable::SharedWavetable>,
-            Option<crate::wavetable::SharedTimeBuffer>,
-        ),
-        String,
-    > {
-        match mode {
-            ScriptMode::Wavetable => {
-                let wt = self.generate_wavetable()?;
-                Ok((Some(wt), None))
-            }
-            ScriptMode::TimeBased => {
-                let tb =
-                    self.generate_time_buffer(sample_rate, crate::wavetable::TIME_BUFFER_DURATION)?;
-                Ok((None, Some(tb)))
-            }
-        }
+    pub fn get_mode(&self) -> Option<ScriptMode> {
+        *self.mode.lock().unwrap()
     }
 }
-
-// Tests
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn eval(src: &str) -> f32 {
-        let eng = ScriptEngine::compile(src, ScriptMode::Wavetable).expect("compile");
-        // Evaluate at x = pi (middle of the waveform), t = 0
-        eng.evaluate(std::f32::consts::PI, 0.0).expect("eval")
+    #[test]
+    fn test_sine_validate() {
+        assert!(validate_script("math.sin(x)").is_ok());
     }
 
     #[test]
-    fn test_pure_float() {
-        let v = eval("sin(x)");
-        assert!((v - 0.0_f32).abs() < 1e-5, "sin(π) ≈ 0, got {v}");
+    fn test_sine_context() {
+        let ctx = LuaContext::compile("math.sin(x)", ScriptMode::Wavetable).unwrap();
+        let val = ctx.eval_x(std::f32::consts::PI / 2.0);
+        assert!((val - 1.0).abs() < 0.01);
     }
 
     #[test]
-    fn test_int_multiplier_in_argument() {
-        let v = eval("sin(x * 3)");
-        assert!(v.is_finite(), "sin(x*3) must be finite, got {v}");
+    fn test_sine_time() {
+        let ctx =
+            LuaContext::compile("math.sin(t * math.pi * 2 * 440)", ScriptMode::TimeBased).unwrap();
+        assert!(ctx.eval_t(0.0).abs() < 0.001);
+        let t = 1.0 / (4.0 * 440.0);
+        assert!((ctx.eval_t(t) - 1.0).abs() < 0.01);
     }
 
     #[test]
-    fn test_float_scaling_of_result() {
-        let v = eval("sin(x) * 0.05");
-        assert!(v.abs() <= 0.06, "sin(x)*0.05 out of range: {v}");
+    fn test_complex() {
+        let ctx =
+            LuaContext::compile("math.sin(x) + math.sin(x*3)*0.25", ScriptMode::Wavetable).unwrap();
+        ctx.eval_x(1.0);
     }
 
     #[test]
-    fn test_int_scaling_of_result() {
-        let v = eval("sin(x) * 2");
-        assert!(v.is_finite(), "sin(x)*2 must be finite, got {v}");
+    fn test_dsp_functions() {
+        for expr in &[
+            "dsp.saw(x)",
+            "dsp.triangle(x)",
+            "dsp.noise(x)",
+            "dsp.square(x)",
+            "dsp.square(x, 0.3)",
+            "dsp.fold(math.sin(x*2), 0.5)",
+            "dsp.clip(x, 0.5)",
+            "math.rand()",
+        ] {
+            assert!(validate_script(expr).is_ok(), "failed to validate: {expr}");
+        }
     }
 
     #[test]
-    fn test_mixed_arithmetic() {
-        let v = eval("6 * 0.05");
-        assert!((v - 0.3_f32).abs() < 1e-4, "6 * 0.05 = 0.3, got {v}");
+    fn test_time_am() {
+        let ctx = LuaContext::compile(
+            "math.sin(t * math.pi * 2 * 55) * math.sin(t * math.pi * 2 * 66) * math.exp(-t * 3)",
+            ScriptMode::TimeBased,
+        )
+        .unwrap();
+        assert!(ctx.eval_t(0.0).abs() < 0.001);
     }
 
     #[test]
-    fn test_complex_patch() {
-        let v = eval("sin(x) + sin(x * 3) * 0.25");
-        assert!(v.is_finite(), "complex patch must be finite, got {v}");
+    fn test_time_decay() {
+        let ctx = LuaContext::compile(
+            "math.sin(t * math.pi * 2 * 220) * math.exp(-t * 3)",
+            ScriptMode::TimeBased,
+        )
+        .unwrap();
+        assert!(ctx.eval_t(0.0).abs() < 0.001);
+        let v1 = ctx.eval_t(1.0);
+        assert!(v1.abs() <= 1.0);
+        assert!(ctx.eval_t(0.25).abs() < 0.01);
     }
 
     #[test]
-    fn test_tanh_saw_noise() {
-        let v = eval("tanh(saw(x) + noise(x) * 0.05)");
-        assert!(v.is_finite(), "tanh patch must be finite, got {v}");
-    }
+    fn test_multi_line_script() {
+        // User's FM synthesis example with local variables and math.*
+        let source = r#"
+local freq = 440.0
+local fc = freq
+local fm = freq * 14.0
+local Ac = 1.0
+local I0 = 5.0
+local Tc = 1.5
+local Tm = 0.08
 
-    #[test]
-    fn test_time_variable_available() {
-        let v = eval("t");
-        assert!((v - 0.0_f32).abs() < 1e-6, "t should be 0, got {v}");
-    }
+local carrier_env = math.exp(-t / Tc)
+local mod_env = math.exp(-t / Tm)
 
-    #[test]
-    fn test_time_phase_modulation() {
-        let v = eval("sin(x + t)");
+local phase = 2.0 * math.pi * fc * t
+            + I0 * mod_env * math.sin(2.0 * math.pi * fm * t)
+
+return Ac * carrier_env * math.sin(phase)
+"#;
         assert!(
-            (v - 0.0_f32).abs() < 1e-5,
-            "sin(x+t) at t=0 ≈ sin(x), got {v}"
+            validate_script(source).is_ok(),
+            "multi-line script should validate"
         );
-    }
 
-    #[test]
-    fn test_amplitude_modulation_over_time() {
-        let eng = ScriptEngine::compile("sin(x) * sin(t * pi * 4)", ScriptMode::Wavetable)
-            .expect("compile");
-        let v = eng.evaluate(std::f32::consts::PI * 0.5, 0.0).expect("eval");
-        assert!(
-            (v - 0.0_f32).abs() < 1e-5,
-            "sin(x)*sin(t*4pi) at t=0 should be 0, got {v}"
-        );
-        let v2 = eng
-            .evaluate(std::f32::consts::PI * 0.5, 0.125)
-            .expect("eval");
-        assert!(
-            (v2 - 1.0_f32).abs() < 1e-4,
-            "sin(x)*sin(t*4pi) at t=0.125 should be ≈ 1, got {v2}"
-        );
-    }
-
-    #[test]
-    fn test_exponential_decay_builtin() {
-        let eng =
-            ScriptEngine::compile("sin(x) * exp(-t * 3)", ScriptMode::Wavetable).expect("compile");
-        let v0 = eng
-            .evaluate(std::f32::consts::PI * 0.5, 0.0)
-            .expect("eval at t=0");
-        let v1 = eng
-            .evaluate(std::f32::consts::PI * 0.5, 1.0)
-            .expect("eval at t=1");
-        assert!((v0 - 1.0_f32).abs() < 1e-4, "at t=0 should be 1, got {v0}");
-        assert!(
-            (v1 - 0.0497_f32).abs() < 1e-2,
-            "at t=1 should be ≈ e^-3 ≈ 0.05, got {v1}"
-        );
-    }
-
-    #[test]
-    fn test_time_based_mode_basic() {
-        let eng = ScriptEngine::compile("sin(t)", ScriptMode::TimeBased).expect("compile");
-        let v0 = eng.evaluate(0.0, 0.0).expect("eval t=0");
-        assert!((v0 - 0.0).abs() < 1e-6, "sin(0) should be 0, got {v0}");
-        // At t = pi/2 ≈ 1.57, sin(t) ≈ 1.0
-        let v1 = eng
-            .evaluate(0.0, std::f32::consts::PI * 0.5)
-            .expect("eval t=pi/2");
-        assert!((v1 - 1.0).abs() < 1e-4, "sin(pi/2) should be 1, got {v1}");
-    }
-
-    #[test]
-    fn test_time_based_evaluate_ignores_x() {
-        // In time-based mode, x is still bound but the script only uses t.
-        let eng = ScriptEngine::compile("t", ScriptMode::TimeBased).expect("compile");
-        let v = eng.evaluate(999.0, 2.5).expect("eval");
-        assert!(
-            (v - 2.5).abs() < 1e-4,
-            "t-only script should return t, got {v}"
-        );
+        let ctx = LuaContext::compile(source, ScriptMode::TimeBased).unwrap();
+        // At t=0: envelope starts at 1, sin(0)=0 → output ≈ 0
+        assert!(ctx.eval_t(0.0).abs() < 0.01);
+        // Should produce some non-zero output shortly after
+        let val = ctx.eval_t(0.01);
+        assert!(val.abs() > 0.0);
     }
 }

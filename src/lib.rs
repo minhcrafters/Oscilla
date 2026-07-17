@@ -1,7 +1,7 @@
 //! Oscilla — programmable oscillator synthesizer plugin.
 //!
 //! A cross-platform VST3/CLAP software synthesizer based around a custom
-//! lightweight scripting language that lets users program their own
+//! lightweight Lua scripting language that lets users program their own
 //! oscillator waveforms. Think of it as a "shader language for sound."
 
 pub mod dsp;
@@ -11,15 +11,17 @@ pub mod script;
 pub mod wavetable;
 
 use crate::dsp::filter::FilterType;
-use crate::dsp::{SynthEngine, TimeBufferSlot, WavetableSlot};
+use crate::dsp::{SynthEngine, WavetableSlot};
 use crate::gui::EditorHandle;
-use crate::script::{ScriptCompiler, ScriptMode};
-use crate::wavetable::{default_time_buffer, default_wavetable};
+use crate::script::{LuaContext, ScriptCompiler, ScriptMode};
+use crate::wavetable::{SCOPE_SIZE, default_wavetable};
+use arc_swap::ArcSwap;
 use atomic_refcell::AtomicRefCell;
 use iced_code_editor::CodeEditor;
 use nice_plug::prelude::*;
 use nice_plug_iced::iced::PollSubNotifier;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
 // Plugin
@@ -28,9 +30,12 @@ pub struct Oscilla {
     params: Arc<OscillaParams>,
     engine: SynthEngine,
     wavetable_slot: Arc<WavetableSlot>,
-    time_buffer_slot: Arc<TimeBufferSlot>,
+    /// Compiled Lua source code for time-based mode, swapped atomically.
+    lua_source_slot: Arc<ArcSwap<String>>,
     compiler: Arc<ScriptCompiler>,
     peak_output: Arc<AtomicF32>,
+    scope_buffer: Arc<Mutex<Box<[f32; SCOPE_SIZE]>>>,
+    scope_write_pos: usize,
     sample_rate: Arc<AtomicF32>,
     notifier: PollSubNotifier,
     last_compiled: String,
@@ -48,15 +53,18 @@ impl Default for Oscilla {
     fn default() -> Self {
         let sample_rate = Arc::new(AtomicF32::new(44100.0));
         let default_table = default_wavetable();
-        let default_time_buf = default_time_buffer(44100.0);
 
         Self {
             params: Arc::new(OscillaParams::default()),
             engine: SynthEngine::new(sample_rate.load(Ordering::Relaxed)),
             wavetable_slot: Arc::new(WavetableSlot::new(Arc::new(default_table))),
-            time_buffer_slot: Arc::new(TimeBufferSlot::new(Arc::new(default_time_buf))),
+            lua_source_slot: Arc::new(ArcSwap::from_pointee(String::from(
+                "math.sin(t * math.pi * 2 * 440)",
+            ))),
             compiler: Arc::new(ScriptCompiler::new()),
             peak_output: Arc::new(AtomicF32::new(0.0)),
+            scope_buffer: Arc::new(Mutex::new(Box::new([0.0f32; SCOPE_SIZE]))),
+            scope_write_pos: 0,
             notifier: PollSubNotifier::new(),
             sample_rate,
             last_compiled: String::new(),
@@ -66,7 +74,6 @@ impl Default for Oscilla {
 
 // Parameters
 
-/// Helper: parse a string as f32.
 fn parse_f32(s: &str) -> Option<f32> {
     s.parse().ok()
 }
@@ -112,11 +119,9 @@ pub struct OscillaParams {
     #[id = "glide"]
     pub glide_time: FloatParam,
 
-    /// 0 = Wavetable (x-based), 1 = Time-based (t-based).
     #[id = "script_mode"]
     pub script_mode: IntParam,
 
-    /// The wave script is persisted but not automatable.
     #[persist = "wave-script"]
     pub wave_script: AtomicRefCell<String>,
 }
@@ -252,7 +257,7 @@ impl Default for OscillaParams {
 
             script_mode: IntParam::new("Script Mode", 0, IntRange::Linear { min: 0, max: 1 }),
 
-            wave_script: AtomicRefCell::new(String::from("sin(x)")),
+            wave_script: AtomicRefCell::new(String::from("math.sin(x)")),
         }
     }
 }
@@ -291,38 +296,42 @@ impl Plugin for Oscilla {
 
     fn task_executor(&mut self) -> Box<dyn Fn(Self::BackgroundTask) + Send> {
         let wt_slot = self.wavetable_slot.clone();
-        let tb_slot = self.time_buffer_slot.clone();
+        let lua_slot = self.lua_source_slot.clone();
         let compiler = self.compiler.clone();
         let notifier = self.notifier.clone();
-        let sr = self.sample_rate.clone();
 
         Box::new(move |task| match task {
-            OscillaTask::CompileScript { source, mode } => match compiler.compile(&source, mode) {
-                Ok(()) => {
-                    let rate = sr.load(Ordering::Relaxed);
-                    match compiler.generate_both(mode, rate) {
-                        Ok((wt_opt, tb_opt)) => {
-                            if let Some(wt) = wt_opt {
-                                wt_slot.store(wt);
+            OscillaTask::CompileScript { source, mode } => {
+                match compiler.compile(&source, mode) {
+                    Ok(()) => match mode {
+                        ScriptMode::Wavetable => {
+                            // Generate wavetable from Lua evaluation.
+                            match LuaContext::compile(&source, ScriptMode::Wavetable) {
+                                Ok(ctx) => {
+                                    let wt = generate_wavetable_from_lua(&ctx);
+                                    wt_slot.store(wt);
+                                    notifier.notify();
+                                }
+                                Err(e) => {
+                                    log::error!("Oscilla: Lua eval error: {e}");
+                                    compiler.store_error(e);
+                                    notifier.notify();
+                                }
                             }
-                            if let Some(tb) = tb_opt {
-                                tb_slot.store(tb);
-                            }
+                        }
+                        ScriptMode::TimeBased => {
+                            // Store the Lua source for real-time evaluation.
+                            lua_slot.store(Arc::new(source.clone()));
                             notifier.notify();
                         }
-                        Err(e) => {
-                            log::error!("Oscilla: buffer generation: {e}");
-                            compiler.store_error(e);
-                            notifier.notify();
-                        }
+                    },
+                    Err(e) => {
+                        log::error!("Oscilla: script compile: {e}");
+                        compiler.store_error(e);
+                        notifier.notify();
                     }
                 }
-                Err(e) => {
-                    log::error!("Oscilla: script compile: {e}");
-                    compiler.store_error(e);
-                    notifier.notify();
-                }
-            },
+            }
         })
     }
 
@@ -333,13 +342,14 @@ impl Plugin for Oscilla {
         let editor_state = gui::OscillaEditorState {
             params: self.params.clone(),
             wavetable_slot: self.wavetable_slot.clone(),
-            time_buffer_slot: self.time_buffer_slot.clone(),
+            lua_source_slot: self.lua_source_slot.clone(),
             peak_output: self.peak_output.clone(),
+            scope_buffer: self.scope_buffer.clone(),
             notifier: self.notifier.clone(),
             compiler: self.compiler.clone(),
             sample_rate: self.sample_rate.clone(),
             async_executor: executor,
-            editor_handle: EditorHandle(CodeEditor::new(&initial_text, "rs")),
+            editor_handle: EditorHandle(CodeEditor::new(&initial_text, "lua")),
         };
 
         nice_plug_iced::create_iced_editor(
@@ -401,8 +411,7 @@ impl Plugin for Oscilla {
         _aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        let mut table = self.wavetable_slot.load();
-        let mut time_buf = self.time_buffer_slot.load();
+        let table = self.wavetable_slot.load();
         let mut next_event = context.next_event();
         let mut had_events = false;
         let mut peak = 0.0f32;
@@ -414,32 +423,39 @@ impl Plugin for Oscilla {
         self.engine.script_mode = mode;
 
         let script = self.params.wave_script.borrow().clone();
+        let mut lua_ctx: Option<LuaContext> = None;
+
         if script != self.last_compiled {
-            if let Err(e) = self.compiler.compile(&script, mode) {
-                log::error!("Oscilla: init compile error: {e}");
-                self.compiler.store_error(e);
-            } else {
-                match self
-                    .compiler
-                    .generate_both(mode, self.sample_rate.load(Ordering::Relaxed))
-                {
-                    Ok((wt_opt, tb_opt)) => {
-                        if let Some(wt) = wt_opt {
-                            self.wavetable_slot.store(wt);
+            match self.compiler.compile(&script, mode) {
+                Ok(()) => match mode {
+                    ScriptMode::Wavetable => {
+                        match LuaContext::compile(&script, ScriptMode::Wavetable) {
+                            Ok(ctx) => {
+                                let wt = generate_wavetable_from_lua(&ctx);
+                                self.wavetable_slot.store(wt);
+                            }
+                            Err(e) => {
+                                log::error!("Oscilla: Lua eval error: {e}");
+                                self.compiler.store_error(e);
+                            }
                         }
-                        if let Some(tb) = tb_opt {
-                            self.time_buffer_slot.store(tb);
-                        }
-                        self.last_compiled = script;
                     }
-                    Err(e) => {
-                        log::error!("Oscilla: init buffer generation: {e}");
-                        self.compiler.store_error(e);
+                    ScriptMode::TimeBased => {
+                        self.lua_source_slot.store(Arc::new(script.clone()));
                     }
+                },
+                Err(e) => {
+                    log::error!("Oscilla: init compile error: {e}");
+                    self.compiler.store_error(e);
                 }
             }
-            table = self.wavetable_slot.load();
-            time_buf = self.time_buffer_slot.load();
+            self.last_compiled = script;
+        }
+
+        // For time-based mode, compile the Lua context once per block.
+        if mode == ScriptMode::TimeBased {
+            let src = self.lua_source_slot.load_full();
+            lua_ctx = LuaContext::compile(&src, ScriptMode::TimeBased).ok();
         }
 
         let ft = match self.params.filter_type.modulated_plain_value() {
@@ -461,9 +477,11 @@ impl Plugin for Oscilla {
             self.params.glide_time.smoothed.next(),
         );
 
-        // Single-pass: collect MIDI + render audio together
+        let mut scope_pos = self.scope_write_pos;
+        let mut scope_local: [f32; SCOPE_SIZE] = [0.0; SCOPE_SIZE];
+        let scope_local_start = scope_pos;
+
         for (sample_id, channel_samples) in buffer.iter_samples().enumerate() {
-            // Process any MIDI events at this sample position.
             while let Some(event) = next_event {
                 if event.timing() > sample_id as u32 {
                     break;
@@ -482,17 +500,14 @@ impl Plugin for Oscilla {
                 next_event = context.next_event();
             }
 
-            // Dispatch voice allocation when events arrive.
             if had_events {
                 self.engine.process_events();
                 had_events = false;
             }
 
-            // Advance volume smoother per-sample for sample-accurate automation.
             self.engine.set_volume(self.params.volume.smoothed.next());
 
-            // Render one sample.
-            let (l, r) = self.engine.process_sample(&table, &time_buf);
+            let (l, r) = self.engine.process_sample(&table, lua_ctx.as_ref());
 
             let mut ch = channel_samples.into_iter();
             if let Some(s) = ch.next() {
@@ -506,23 +521,37 @@ impl Plugin for Oscilla {
             if abs > peak {
                 peak = abs;
             }
+
+            scope_local[scope_pos] = (l + r) * 0.5;
+            scope_pos = (scope_pos + 1) % SCOPE_SIZE;
         }
 
-        // Update peak meter
+        self.scope_write_pos = scope_pos;
+
+        {
+            let mut buf = self.scope_buffer.lock().unwrap();
+            if scope_pos > scope_local_start {
+                buf[scope_local_start..scope_pos]
+                    .copy_from_slice(&scope_local[scope_local_start..scope_pos]);
+            } else {
+                buf[scope_local_start..].copy_from_slice(&scope_local[scope_local_start..]);
+                buf[..scope_pos].copy_from_slice(&scope_local[..scope_pos]);
+            }
+        }
+
         if self.params.window_state.is_open() {
+            self.notifier.notify();
+
             let cur = self.peak_output.load(Ordering::Relaxed);
             let new = if peak > cur {
                 peak
             } else if peak < 0.0001 {
-                // Silence: drop immediately.
                 0.0
             } else {
-                // ~30 dB/s decay — matches typical digital peak ballistics.
                 cur * 0.99 + peak * 0.01
             };
             if (cur - new).abs() > 0.0001 {
                 self.peak_output.store(new, Ordering::Relaxed);
-                self.notifier.notify();
             }
         }
 
@@ -530,6 +559,21 @@ impl Plugin for Oscilla {
     }
 
     fn deactivate(&mut self) {}
+}
+
+/// Generate a wavetable by evaluating a Lua function at 2048 phase points.
+fn generate_wavetable_from_lua(ctx: &LuaContext) -> crate::wavetable::SharedWavetable {
+    let inv_n = 1.0 / crate::wavetable::WAVETABLE_SIZE as f32;
+    let mut data = Box::new([0.0f32; crate::wavetable::WAVETABLE_SIZE]);
+    for (i, s) in data.iter_mut().enumerate() {
+        let x = i as f32 * inv_n * 2.0 * std::f32::consts::PI;
+        *s = ctx.eval_x(x);
+    }
+    crate::wavetable::remove_dc(&mut data);
+    crate::wavetable::normalize(&mut data);
+    crate::wavetable::band_limit(&mut data, 200);
+    crate::wavetable::normalize(&mut data);
+    Arc::new(data)
 }
 
 // Format exports

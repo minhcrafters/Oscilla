@@ -1,9 +1,10 @@
 use crate::OscillaParams;
 use crate::OscillaTask;
+use crate::dsp::WavetableSlot;
 use crate::dsp::filter::FilterType;
-use crate::dsp::{TimeBufferSlot, WavetableSlot};
 use crate::script::{ScriptCompiler, ScriptMode};
-use crate::wavetable::{SharedTimeBuffer, SharedWavetable};
+use crate::wavetable::{SCOPE_SIZE, SharedWavetable};
+use arc_swap::ArcSwap;
 use iced_audio::param::nice_to_iced;
 use iced_audio::{Gesture, Knob};
 use iced_code_editor::CodeEditor;
@@ -25,6 +26,7 @@ use nice_plug_iced::iced::{
 use nice_plug_iced::{EditorState, NiceGuiContext};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
 /// Thread-safe handle for `CodeEditor`.
@@ -224,8 +226,9 @@ pub enum Message {
 pub struct OscillaEditorState {
     pub params: Arc<OscillaParams>,
     pub wavetable_slot: Arc<WavetableSlot>,
-    pub time_buffer_slot: Arc<TimeBufferSlot>,
+    pub lua_source_slot: Arc<ArcSwap<String>>,
     pub peak_output: Arc<AtomicF32>,
+    pub scope_buffer: Arc<Mutex<Box<[f32; SCOPE_SIZE]>>>,
     pub notifier: PollSubNotifier,
     pub compiler: Arc<ScriptCompiler>,
     pub sample_rate: Arc<AtomicF32>,
@@ -286,7 +289,7 @@ impl OscillaGui {
     pub fn new(
         mut editor_state: EditorState<OscillaEditorState>,
         nice_ctx: NiceGuiContext,
-    ) -> Self {
+    ) -> (Self, Task<Message>) {
         // Configure the code editor to match VS Code Dark+ theme.
         editor_state.editor_handle.set_font(Font::MONOSPACE);
         editor_state.editor_handle.set_font_size(13.0, true);
@@ -296,14 +299,31 @@ impl OscillaGui {
             .editor_handle
             .set_indent_style(IndentStyle::Spaces(2));
 
-        Self {
-            editor_state,
-            nice_ctx,
-            status_message: String::from("Ready"),
-            compile_ok: true,
-            peak_output_db: util::MINUS_INFINITY_DB,
-            compile_pending: false,
-        }
+        // The nice-plug wrapper calls Plugin::editor() before the host restores
+        // plugin state, so the CodeEditor may have been created with the default
+        // "math.sin(x)" text.  At this point (window-open time) persisted params have
+        // been restored, so sync the editor content with the real wave script.
+        let persisted_script = editor_state.params.wave_script.borrow().clone();
+        let task = if editor_state.editor_handle.content() != persisted_script {
+            editor_state
+                .editor_handle
+                .reset(&persisted_script)
+                .map(Message::EditorEvent)
+        } else {
+            Task::none()
+        };
+
+        (
+            Self {
+                editor_state,
+                nice_ctx,
+                status_message: String::from("Ready"),
+                compile_ok: true,
+                peak_output_db: util::MINUS_INFINITY_DB,
+                compile_pending: false,
+            },
+            task,
+        )
     }
 
     pub fn theme(&self) -> Option<Theme> {
@@ -550,9 +570,13 @@ impl OscillaGui {
         .height(Length::Fill);
 
         // Waveform preview
+        let scope_snapshot = {
+            let buf = self.editor_state.scope_buffer.lock().unwrap();
+            (*buf).clone()
+        };
         let preview = Canvas::new(WaveformPreview {
             wavetable: self.editor_state.wavetable_slot.load(),
-            time_buffer: self.editor_state.time_buffer_slot.load(),
+            scope_snapshot,
             mode,
             accent: ACCENT,
         })
@@ -754,7 +778,8 @@ impl OscillaGui {
 
 struct WaveformPreview {
     wavetable: SharedWavetable,
-    time_buffer: SharedTimeBuffer,
+    /// Snapshot of the oscilloscope ring buffer for this frame.
+    scope_snapshot: Box<[f32; SCOPE_SIZE]>,
     mode: ScriptMode,
     accent: Color,
 }
@@ -812,21 +837,22 @@ impl Program<Message> for WaveformPreview {
                 }
             }
             ScriptMode::TimeBased => {
-                let data = self.time_buffer.as_ref();
-                if !data.is_empty() {
-                    let step = (data.len() as f32 / w).max(1.0);
-                    while i < data.len() as f32 {
-                        let s = data[i as usize];
-                        let px = (i / data.len() as f32) * w;
-                        let py = mid - s * mid * 0.80;
-                        if first {
-                            builder.move_to(Point::new(px, py));
-                            first = false;
-                        } else {
-                            builder.line_to(Point::new(px, py));
-                        }
-                        i += step;
+                let data = self.scope_snapshot.as_ref();
+                // Draw the oscilloscope trace: map the 512-sample window
+                // across the preview width, centred vertically.
+                let n = data.len() as f32;
+                let step = (n / w).max(1.0);
+                while i < n {
+                    let s = data[i as usize];
+                    let px = (i / n) * w;
+                    let py = mid - s * mid * 0.80;
+                    if first {
+                        builder.move_to(Point::new(px, py));
+                        first = false;
+                    } else {
+                        builder.line_to(Point::new(px, py));
                     }
+                    i += step;
                 }
             }
         }
