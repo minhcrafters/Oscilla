@@ -243,6 +243,13 @@ impl ScriptEngine {
             },
         );
 
+        engine.register_fn(
+            "rand",
+            || -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
+                Ok(rhai::Dynamic::from(rand::random::<f32>()))
+            },
+        );
+
         // Core math
         macro_rules! reg_math {
             ($name:expr, $func:expr) => {
@@ -268,15 +275,6 @@ impl ScriptEngine {
         reg_math!("ceil", |x: f32| x.ceil());
         reg_math!("round", |x: f32| x.round());
         reg_math!("fract", |x: f32| x.fract());
-
-        engine.register_fn(
-            "pow",
-            |x: rhai::Dynamic,
-             y: rhai::Dynamic|
-             -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
-                Ok(rhai::Dynamic::from(as_f32(x)?.powf(as_f32(y)?)))
-            },
-        );
 
         // Arithmetic fallback operators
         engine.register_fn(

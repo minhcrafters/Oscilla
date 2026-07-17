@@ -30,6 +30,7 @@ tracing = { version = "0.1", features = [
     "max_level_info",
     "release_max_level_info",
 ] }
+rand = "0.10.2"
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
