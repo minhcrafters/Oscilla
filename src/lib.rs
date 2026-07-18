@@ -39,7 +39,8 @@ pub struct Oscilla {
     time_buffer_slot: Arc<TimeBufferSlot>,
     compiler: Arc<ScriptCompiler>,
     peak_output: Arc<AtomicF32>,
-    scope_buffer: Arc<Mutex<Box<[f32; SCOPE_SIZE]>>>,
+    scope_buffer: Arc<Mutex<(Box<[f32; SCOPE_SIZE]>, usize)>>,
+    #[allow(dead_code)]
     scope_write_pos: usize,
     sample_rate: Arc<AtomicF32>,
     notifier: PollSubNotifier,
@@ -75,7 +76,7 @@ impl Default for Oscilla {
             },
             compiler: Arc::new(ScriptCompiler::new()),
             peak_output: Arc::new(AtomicF32::new(0.0)),
-            scope_buffer: Arc::new(Mutex::new(Box::new([0.0f32; SCOPE_SIZE]))),
+            scope_buffer: Arc::new(Mutex::new((Box::new([0.0f32; SCOPE_SIZE]), 0))),
             scope_write_pos: 0,
             notifier: PollSubNotifier::new(),
             sample_rate,
@@ -590,8 +591,11 @@ impl Plugin for Oscilla {
 
         self.scope_write_pos = scope_pos;
 
+        // Copy the local scope buffer to the shared buffer (one mutex lock).
         {
-            let mut buf = self.scope_buffer.lock().unwrap();
+            let mut guard = self.scope_buffer.lock().unwrap();
+            let (ref mut buf, ref mut pos) = *guard;
+            *pos = scope_pos;
             if scope_pos > scope_local_start {
                 buf[scope_local_start..scope_pos]
                     .copy_from_slice(&scope_local[scope_local_start..scope_pos]);

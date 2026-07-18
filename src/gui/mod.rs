@@ -23,7 +23,7 @@ use nice_plug_iced::iced::{
     widget::{
         Column, Container, Row, Space, button,
         canvas::{self, Canvas, Frame, Geometry, Program},
-        column, container, mouse_area, pick_list, row, text,
+        column, container, mouse_area, pick_list, row, scrollable, text, text_input,
     },
 };
 use nice_plug_iced::{EditorState, NiceGuiContext};
@@ -225,6 +225,14 @@ pub enum Message {
     ScriptModeChanged(ScriptMode),
     SavePreset,
     LoadPreset,
+    /// Save popup interactions.
+    SaveNameChanged(String),
+    ConfirmSave,
+    /// Load popup interactions.
+    SelectPreset(String),
+    ConfirmLoad,
+    LoadFromList(String),
+    ClosePopup,
 }
 
 // Editor state
@@ -236,7 +244,7 @@ pub struct OscillaEditorState {
     #[cfg(feature = "time-buffer")]
     pub time_buffer_slot: Arc<TimeBufferSlot>,
     pub peak_output: Arc<AtomicF32>,
-    pub scope_buffer: Arc<Mutex<Box<[f32; SCOPE_SIZE]>>>,
+    pub scope_buffer: Arc<Mutex<(Box<[f32; SCOPE_SIZE]>, usize)>>,
     pub notifier: PollSubNotifier,
     pub compiler: Arc<ScriptCompiler>,
     pub sample_rate: Arc<AtomicF32>,
@@ -291,6 +299,18 @@ pub struct OscillaGui {
     compile_ok: bool,
     peak_output_db: f32,
     compile_pending: bool,
+    /// Popup state: None = closed, Some(true) = save, Some(false) = load.
+    popup: Option<PopupState>,
+}
+
+enum PopupState {
+    Save {
+        name: String,
+    },
+    Load {
+        files: Vec<String>,
+        selected: Option<String>,
+    },
 }
 
 impl OscillaGui {
@@ -329,6 +349,7 @@ impl OscillaGui {
                 compile_ok: true,
                 peak_output_db: util::MINUS_INFINITY_DB,
                 compile_pending: false,
+                popup: None,
             },
             task,
         )
@@ -482,33 +503,66 @@ impl OscillaGui {
                 Task::done(Message::LoseEditorFocus)
             }
             Message::SavePreset => {
-                let preset = self.build_preset();
-                let text = preset.to_string();
-                if let Some(path) = preset_path() {
-                    let parent = path.parent().unwrap();
-                    let _ = std::fs::create_dir_all(parent);
-                    match std::fs::write(&path, &text) {
-                        Ok(()) => {
-                            self.status_message =
-                                format!("Saved: {}", path.file_name().unwrap().to_string_lossy());
-                        }
-                        Err(e) => {
-                            self.status_message = format!("Save error: {e}");
-                        }
-                    }
-                }
+                self.popup = Some(PopupState::Save {
+                    name: String::from("preset"),
+                });
                 Task::none()
             }
             Message::LoadPreset => {
-                if let Some(path) = preset_path() {
+                let files = list_presets();
+                self.popup = Some(PopupState::Load {
+                    files,
+                    selected: None,
+                });
+                Task::none()
+            }
+            Message::SaveNameChanged(name) => {
+                if let Some(PopupState::Save { name: ref mut n }) = self.popup {
+                    *n = name;
+                }
+                Task::none()
+            }
+            Message::ConfirmSave => {
+                if let Some(PopupState::Save { ref name }) = self.popup {
+                    let preset = self.build_preset(name);
+                    let text = preset.to_string();
+                    if let Some(dir) = preset_dir() {
+                        let _ = std::fs::create_dir_all(&dir);
+                        let path = dir.join(format!("{name}.osc"));
+                        match std::fs::write(&path, &text) {
+                            Ok(()) => {
+                                self.status_message = format!("Saved: {name}.osc");
+                            }
+                            Err(e) => {
+                                self.status_message = format!("Save error: {e}");
+                            }
+                        }
+                    }
+                }
+                self.popup = None;
+                Task::none()
+            }
+            Message::SelectPreset(filename) => {
+                if let Some(PopupState::Load { selected, .. }) = &mut self.popup {
+                    *selected = Some(filename);
+                }
+                Task::none()
+            }
+            Message::ConfirmLoad => {
+                let filename = match &self.popup {
+                    Some(PopupState::Load {
+                        selected: Some(f), ..
+                    }) => f.clone(),
+                    _ => return Task::none(),
+                };
+                self.popup = None;
+                if let Some(dir) = preset_dir() {
+                    let path = dir.join(&filename);
                     match std::fs::read_to_string(&path) {
                         Ok(text) => match Preset::parse(&text) {
                             Ok(preset) => {
                                 self.apply_preset(&preset);
-                                self.status_message = format!(
-                                    "Loaded: {}",
-                                    path.file_name().unwrap().to_string_lossy()
-                                );
+                                self.status_message = format!("Loaded: {filename}");
                             }
                             Err(e) => {
                                 self.status_message = format!("Parse error: {e}");
@@ -521,13 +575,38 @@ impl OscillaGui {
                 }
                 Task::none()
             }
+            Message::LoadFromList(filename) => {
+                if let Some(dir) = preset_dir() {
+                    let path = dir.join(&filename);
+                    match std::fs::read_to_string(&path) {
+                        Ok(text) => match Preset::parse(&text) {
+                            Ok(preset) => {
+                                self.apply_preset(&preset);
+                                self.status_message = format!("Loaded: {filename}");
+                            }
+                            Err(e) => {
+                                self.status_message = format!("Parse error: {e}");
+                            }
+                        },
+                        Err(e) => {
+                            self.status_message = format!("Read error: {e}");
+                        }
+                    }
+                }
+                self.popup = None;
+                Task::none()
+            }
+            Message::ClosePopup => {
+                self.popup = None;
+                Task::none()
+            }
         }
     }
 
-    fn build_preset(&self) -> Preset {
+    fn build_preset(&self, name: &str) -> Preset {
         let p = &self.editor_state.params;
         Preset {
-            name: "Oscilla".into(),
+            name: name.into(),
             wave_script: self.editor_state.editor_handle.content(),
             filter_type: match p.filter_type.modulated_plain_value() {
                 0 => FilterType::LowPass,
@@ -737,10 +816,16 @@ impl OscillaGui {
         .width(Length::Fill)
         .height(Length::Fill);
 
-        // Waveform preview
+        // Waveform preview — read scope buffer in temporal order.
         let scope_snapshot = {
-            let buf = self.editor_state.scope_buffer.lock().unwrap();
-            (*buf).clone()
+            let guard = self.editor_state.scope_buffer.lock().unwrap();
+            let (buf, pos) = &*guard;
+            let mut ordered = Box::new([0.0f32; SCOPE_SIZE]);
+            // Reorder: samples after pos come first, then samples before pos.
+            let n = SCOPE_SIZE;
+            ordered[..n - pos].copy_from_slice(&buf[*pos..]);
+            ordered[n - pos..].copy_from_slice(&buf[..*pos]);
+            ordered
         };
         let preview = Canvas::new(WaveformPreview {
             wavetable: self.editor_state.wavetable_slot.load(),
@@ -939,7 +1024,7 @@ impl OscillaGui {
         )
         .on_press(Message::LoseEditorFocus);
 
-        container(row![left, right].spacing(12).padding(12))
+        let main = container(row![left, right].spacing(12).padding(12))
             .style(|_| container::Style {
                 background: Some(Background::Color(BG_DEEP)),
                 border: Border::default(),
@@ -948,15 +1033,227 @@ impl OscillaGui {
                 snap: false,
             })
             .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+            .height(Length::Fill);
+
+        // Show popup overlay when one is active.
+        if let Some(ref popup) = self.popup {
+            popup_view(popup)
+        } else {
+            main.into()
+        }
     }
 }
 
-/// Path to the preset file: `Documents/Oscilla/preset.osc`.
-fn preset_path() -> Option<std::path::PathBuf> {
-    let dir = dirs::document_dir()?.join("Oscilla");
-    Some(dir.join("preset.osc"))
+/// Render a popup panel (save or load).
+fn popup_view(popup: &PopupState) -> Element<'static, Message> {
+    let card = match popup {
+        PopupState::Save { name } => {
+            let input = text_input("Preset name", name)
+                .on_input(Message::SaveNameChanged)
+                .on_submit(Message::ConfirmSave)
+                .padding(8)
+                .size(14);
+
+            let buttons = row![
+                Space::new().width(Length::Fill),
+                button(btn_text("Cancel"))
+                    .on_press(Message::ClosePopup)
+                    .padding([6, 18])
+                    .style(|_theme, status| match status {
+                        button::Status::Active => btn_style(false),
+                        button::Status::Hovered | button::Status::Pressed => {
+                            btn_style(true)
+                        }
+                        _ => button::Style {
+                            background: Some(Background::Color(SURFACE)),
+                            border: Border {
+                                color: BORDER,
+                                width: 1.0,
+                                radius: rad(3.0),
+                            },
+                            text_color: FG_DIM,
+                            shadow: Shadow::default(),
+                            snap: false,
+                        },
+                    }),
+                button(btn_text("Save"))
+                    .on_press(Message::ConfirmSave)
+                    .padding([6, 18])
+                    .style(|_theme, status| match status {
+                        button::Status::Active => btn_style(false),
+                        button::Status::Hovered | button::Status::Pressed => {
+                            btn_style(true)
+                        }
+                        _ => button::Style {
+                            background: Some(Background::Color(SURFACE)),
+                            border: Border {
+                                color: BORDER,
+                                width: 1.0,
+                                radius: rad(3.0),
+                            },
+                            text_color: FG_DIM,
+                            shadow: Shadow::default(),
+                            snap: false,
+                        },
+                    }),
+            ]
+            .spacing(8);
+
+            column![heading("Save Preset"), input, buttons]
+                .spacing(12)
+                .width(300)
+        }
+        PopupState::Load { files, selected } => {
+            let mut list = column![].spacing(2);
+            if files.is_empty() {
+                list = list.push(text("No presets found").size(13).color(FG_DIM));
+            }
+            for f in files.iter() {
+                let name = f.clone();
+                let is_selected = selected.as_deref() == Some(&name);
+                list = list.push(
+                    button(text(name.clone()).size(13).color(if is_selected {
+                        ACCENT
+                    } else {
+                        FG_TEXT
+                    }))
+                    .on_press(Message::SelectPreset(name))
+                    .padding([6, 10])
+                    .width(Length::Fill)
+                    .style(move |_theme, _status| button::Style {
+                        background: if is_selected {
+                            Some(Background::Color(ACCENT_SOFT))
+                        } else {
+                            None
+                        },
+                        border: Border::default(),
+                        text_color: if is_selected { ACCENT } else { FG_TEXT },
+                        shadow: Shadow::default(),
+                        snap: false,
+                    }),
+                );
+            }
+
+            let buttons = row![
+                Space::new().width(Length::Fill),
+                button(btn_text("Cancel"))
+                    .on_press(Message::ClosePopup)
+                    .padding([6, 18])
+                    .style(|_theme, status| match status {
+                        button::Status::Active => btn_style(false),
+                        button::Status::Hovered | button::Status::Pressed => {
+                            btn_style(true)
+                        }
+                        _ => button::Style {
+                            background: Some(Background::Color(SURFACE)),
+                            border: Border {
+                                color: BORDER,
+                                width: 1.0,
+                                radius: rad(3.0),
+                            },
+                            text_color: FG_DIM,
+                            shadow: Shadow::default(),
+                            snap: false,
+                        },
+                    }),
+                button(btn_text("Load"))
+                    .on_press(Message::ConfirmLoad)
+                    .padding([6, 18])
+                    .style(|_theme, status| match status {
+                        button::Status::Active => btn_style(false),
+                        button::Status::Hovered | button::Status::Pressed => {
+                            btn_style(true)
+                        }
+                        _ => button::Style {
+                            background: Some(Background::Color(SURFACE)),
+                            border: Border {
+                                color: BORDER,
+                                width: 1.0,
+                                radius: rad(3.0),
+                            },
+                            text_color: FG_DIM,
+                            shadow: Shadow::default(),
+                            snap: false,
+                        },
+                    }),
+            ]
+            .spacing(8);
+
+            let scroll = scrollable(
+                container(list)
+                    .style(|_| container::Style {
+                        background: Some(Background::Color(BG_DEEP)),
+                        border: Border {
+                            color: BORDER,
+                            width: 1.0,
+                            radius: rad(3.0),
+                        },
+                        ..Default::default()
+                    })
+                    .padding(8)
+                    .width(Length::Fill),
+            )
+            .height(250);
+
+            column![heading("Load Preset"), scroll, buttons]
+                .spacing(12)
+                .width(300)
+        }
+    };
+
+    let card = container(card)
+        .style(|_| container::Style {
+            background: Some(Background::Color(SURFACE)),
+            border: Border {
+                color: BORDER,
+                width: 1.0,
+                radius: rad(6.0),
+            },
+            ..Default::default()
+        })
+        .padding(20);
+
+    container(column![
+        Space::new().height(Length::Fill),
+        row![
+            Space::new().width(Length::Fill),
+            card,
+            Space::new().width(Length::Fill),
+        ]
+        .height(Length::Shrink),
+        Space::new().height(Length::Fill),
+    ])
+    .style(|_| container::Style {
+        background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.7))),
+        ..Default::default()
+    })
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
+/// Path to the preset directory: `Documents/Oscilla/`.
+fn preset_dir() -> Option<std::path::PathBuf> {
+    Some(dirs::document_dir()?.join("Oscilla"))
+}
+
+/// List all `.osc` files in the preset directory.
+fn list_presets() -> Vec<String> {
+    let dir = match preset_dir() {
+        Some(d) => d,
+        None => return vec![],
+    };
+    let mut files: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".osc") {
+                files.push(name);
+            }
+        }
+    }
+    files.sort();
+    files
 }
 
 // Waveform preview

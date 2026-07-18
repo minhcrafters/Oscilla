@@ -302,7 +302,7 @@ impl Preset {
         Ok(preset)
     }
 
-    /// Serialize the preset to a string.
+    /// Serialize the preset to a human-readable string.
     pub fn to_string(&self) -> String {
         let ft_str = match self.filter_type {
             FilterType::LowPass => "lp",
@@ -310,13 +310,28 @@ impl Preset {
             FilterType::BandPass => "bp",
         };
         format!(
-            "name \"{name}\"\n\
-             wave {{ {wave} }}\n\
-             filter {{ cutoff {cutoff} resonance {res} type {ft} }}\n\
-             envelope {{ attack {atk} decay {dec} sustain {sus} release {rel} }}\n\
-             unison {{ voices {uv} detune {det} width {width} }}\n\
-             volume {vol}\n\
-             glide {glide}\n",
+            "name \"{name}\"\n\n\
+             wave {{\n\
+                 {wave}\n\
+             }}\n\n\
+             filter {{\n\
+                 cutoff     {cutoff:>8.1}\n\
+                 resonance  {res:>8.2}\n\
+                 type       {ft:>8}\n\
+             }}\n\n\
+             envelope {{\n\
+                 attack     {atk:>8.3}\n\
+                 decay      {dec:>8.3}\n\
+                 sustain    {sus:>8.2}\n\
+                 release    {rel:>8.3}\n\
+             }}\n\n\
+             unison {{\n\
+                 voices     {uv:>8}\n\
+                 detune     {det:>8.0}\n\
+                 width      {width:>8.2}\n\
+             }}\n\n\
+             volume     {vol:>8.2}\n\
+             glide      {glide:>8.3}\n",
             name = self.name,
             wave = self.wave_script,
             cutoff = self.filter_cutoff,

@@ -23,7 +23,7 @@ pub const WAVETABLE_SIZE: usize = 2048;
 pub type SharedWavetable = Arc<Box<[f32; WAVETABLE_SIZE]>>;
 
 /// Number of samples in the oscilloscope ring buffer.
-pub const SCOPE_SIZE: usize = 512;
+pub const SCOPE_SIZE: usize = 1024;
 
 /// Default sine-based wavetable.
 pub fn default_wavetable() -> Box<[f32; WAVETABLE_SIZE]> {
