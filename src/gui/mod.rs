@@ -4,6 +4,7 @@ use crate::OscillaTask;
 use crate::dsp::TimeBufferSlot;
 use crate::dsp::WavetableSlot;
 use crate::dsp::filter::FilterType;
+use crate::preset::Preset;
 use crate::script::{ScriptCompiler, ScriptMode};
 use crate::wavetable::{SCOPE_SIZE, SharedWavetable};
 use arc_swap::ArcSwap;
@@ -222,6 +223,8 @@ pub enum Message {
 
     FilterTypeChanged(FilterType),
     ScriptModeChanged(ScriptMode),
+    SavePreset,
+    LoadPreset,
 }
 
 // Editor state
@@ -478,7 +481,134 @@ impl OscillaGui {
                 setter.end_set_parameter(&p.script_mode);
                 Task::done(Message::LoseEditorFocus)
             }
+            Message::SavePreset => {
+                let preset = self.build_preset();
+                let text = preset.to_string();
+                if let Some(path) = preset_path() {
+                    let parent = path.parent().unwrap();
+                    let _ = std::fs::create_dir_all(parent);
+                    match std::fs::write(&path, &text) {
+                        Ok(()) => {
+                            self.status_message =
+                                format!("Saved: {}", path.file_name().unwrap().to_string_lossy());
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Save error: {e}");
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::LoadPreset => {
+                if let Some(path) = preset_path() {
+                    match std::fs::read_to_string(&path) {
+                        Ok(text) => match Preset::parse(&text) {
+                            Ok(preset) => {
+                                self.apply_preset(&preset);
+                                self.status_message = format!(
+                                    "Loaded: {}",
+                                    path.file_name().unwrap().to_string_lossy()
+                                );
+                            }
+                            Err(e) => {
+                                self.status_message = format!("Parse error: {e}");
+                            }
+                        },
+                        Err(e) => {
+                            self.status_message = format!("Read error: {e}");
+                        }
+                    }
+                }
+                Task::none()
+            }
         }
+    }
+
+    fn build_preset(&self) -> Preset {
+        let p = &self.editor_state.params;
+        Preset {
+            name: "Oscilla".into(),
+            wave_script: self.editor_state.editor_handle.content(),
+            filter_type: match p.filter_type.modulated_plain_value() {
+                0 => FilterType::LowPass,
+                1 => FilterType::HighPass,
+                _ => FilterType::BandPass,
+            },
+            filter_cutoff: p.filter_cutoff.modulated_plain_value(),
+            filter_resonance: p.filter_resonance.modulated_plain_value(),
+            attack: p.attack.modulated_plain_value(),
+            decay: p.decay.modulated_plain_value(),
+            sustain: p.sustain.modulated_plain_value(),
+            release: p.release.modulated_plain_value(),
+            unison_voices: p.unison_voices.modulated_plain_value() as usize,
+            detune_cents: p.detune_cents.modulated_plain_value(),
+            stereo_width: p.stereo_width.modulated_plain_value(),
+            volume: p.volume.modulated_plain_value(),
+            glide: p.glide_time.modulated_plain_value(),
+        }
+    }
+
+    fn apply_preset(&mut self, preset: &Preset) {
+        let setter = self.nice_ctx.param_setter();
+        let p = &self.editor_state.params;
+
+        setter.begin_set_parameter(&p.volume);
+        setter.set_parameter_normalized(&p.volume, preset.volume);
+        setter.end_set_parameter(&p.volume);
+
+        setter.begin_set_parameter(&p.attack);
+        setter.set_parameter(&p.attack, preset.attack);
+        setter.end_set_parameter(&p.attack);
+
+        setter.begin_set_parameter(&p.decay);
+        setter.set_parameter(&p.decay, preset.decay);
+        setter.end_set_parameter(&p.decay);
+
+        setter.begin_set_parameter(&p.sustain);
+        setter.set_parameter_normalized(&p.sustain, preset.sustain);
+        setter.end_set_parameter(&p.sustain);
+
+        setter.begin_set_parameter(&p.release);
+        setter.set_parameter(&p.release, preset.release);
+        setter.end_set_parameter(&p.release);
+
+        setter.begin_set_parameter(&p.filter_cutoff);
+        setter.set_parameter(&p.filter_cutoff, preset.filter_cutoff);
+        setter.end_set_parameter(&p.filter_cutoff);
+
+        setter.begin_set_parameter(&p.filter_resonance);
+        setter.set_parameter_normalized(&p.filter_resonance, preset.filter_resonance);
+        setter.end_set_parameter(&p.filter_resonance);
+
+        let ft_val = match preset.filter_type {
+            FilterType::LowPass => 0.0,
+            FilterType::HighPass => 1.0,
+            FilterType::BandPass => 2.0,
+        };
+        setter.begin_set_parameter(&p.filter_type);
+        setter.set_parameter_normalized(&p.filter_type, ft_val / 2.0);
+        setter.end_set_parameter(&p.filter_type);
+
+        setter.begin_set_parameter(&p.unison_voices);
+        setter
+            .set_parameter_normalized(&p.unison_voices, (preset.unison_voices as f32 - 1.0) / 6.0);
+        setter.end_set_parameter(&p.unison_voices);
+
+        setter.begin_set_parameter(&p.detune_cents);
+        setter.set_parameter_normalized(&p.detune_cents, preset.detune_cents / 50.0);
+        setter.end_set_parameter(&p.detune_cents);
+
+        setter.begin_set_parameter(&p.stereo_width);
+        setter.set_parameter_normalized(&p.stereo_width, preset.stereo_width);
+        setter.end_set_parameter(&p.stereo_width);
+
+        setter.begin_set_parameter(&p.glide_time);
+        let glide_norm = (preset.glide / 2.0).clamp(0.0, 1.0);
+        setter.set_parameter_normalized(&p.glide_time, glide_norm);
+        setter.end_set_parameter(&p.glide_time);
+
+        // Update the code editor with the preset's wave script.
+        let _ = self.editor_state.editor_handle.reset(&preset.wave_script);
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -548,14 +678,57 @@ impl OscillaGui {
             .spacing(6)
             .align_y(Center);
 
+        let save_btn = button(btn_text("Save"))
+            .on_press(Message::SavePreset)
+            .padding([6, 18])
+            .style(|_theme, status| match status {
+                button::Status::Active => btn_style(false),
+                button::Status::Hovered | button::Status::Pressed => btn_style(true),
+                _ => button::Style {
+                    background: Some(Background::Color(SURFACE)),
+                    border: Border {
+                        color: BORDER,
+                        width: 1.0,
+                        radius: rad(3.0),
+                    },
+                    text_color: FG_DIM,
+                    shadow: Shadow::default(),
+                    snap: false,
+                },
+            });
+        let load_btn = button(btn_text("Load"))
+            .on_press(Message::LoadPreset)
+            .padding([6, 18])
+            .style(|_theme, status| match status {
+                button::Status::Active => btn_style(false),
+                button::Status::Hovered | button::Status::Pressed => btn_style(true),
+                _ => button::Style {
+                    background: Some(Background::Color(SURFACE)),
+                    border: Border {
+                        color: BORDER,
+                        width: 1.0,
+                        radius: rad(3.0),
+                    },
+                    text_color: FG_DIM,
+                    shadow: Shadow::default(),
+                    snap: false,
+                },
+            });
+
         let editor_panel = container(
             column![
                 heading("SCRIPT"),
                 mode_column,
                 editor_container,
-                row![compile_btn, status_text(&self.status_message, ok),]
-                    .spacing(12)
-                    .align_y(Center),
+                row![
+                    compile_btn,
+                    status_text(&self.status_message, ok),
+                    Space::new().width(Length::Fill),
+                    save_btn,
+                    load_btn,
+                ]
+                .spacing(8)
+                .align_y(Center),
             ]
             .spacing(8),
         )
@@ -721,21 +894,24 @@ impl OscillaGui {
         } else {
             format!("{:.1} dB", self.peak_output_db)
         };
-        let footer = container(row![
-            text(format!(
-                "Oscilla v{}-{}",
-                env!("CARGO_PKG_VERSION"),
-                if cfg!(debug_assertions) { "dev" } else { "rel" }
-            ))
-            .size(11)
-            .color(FG_DIM)
-            .font(Font {
-                weight: font::Weight::Bold,
-                ..Font::MONOSPACE
-            }),
-            Space::new().width(Length::Fill),
-            peak_text(peak),
-        ])
+        let footer = container(
+            row![
+                text(format!(
+                    "Oscilla v{}-{}",
+                    env!("CARGO_PKG_VERSION"),
+                    if cfg!(debug_assertions) { "dev" } else { "rel" }
+                ))
+                .size(11)
+                .color(FG_DIM)
+                .font(Font {
+                    weight: font::Weight::Bold,
+                    ..Font::MONOSPACE
+                }),
+                Space::new().width(Length::Fill),
+                peak_text(peak),
+            ]
+            .align_y(Center),
+        )
         .style(|_| section_panel())
         .padding(12)
         .width(Length::Fill);
@@ -775,6 +951,12 @@ impl OscillaGui {
             .height(Length::Fill)
             .into()
     }
+}
+
+/// Path to the preset file: `Documents/Oscilla/preset.osc`.
+fn preset_path() -> Option<std::path::PathBuf> {
+    let dir = dirs::document_dir()?.join("Oscilla");
+    Some(dir.join("preset.osc"))
 }
 
 // Waveform preview
