@@ -29,6 +29,8 @@ pub struct Voice {
     pub unison_detunes: [f32; MAX_UNISON],
     pub unison_pans: [f32; MAX_UNISON],
     pub time_elapsed: f32,
+    #[cfg(feature = "time-buffer")]
+    pub time_buf_pos: f32,
     pub sample_rate: f32,
 }
 
@@ -50,6 +52,8 @@ impl Voice {
             unison_detunes: [1.0; MAX_UNISON],
             unison_pans: [0.0; MAX_UNISON],
             time_elapsed: 0.0,
+            #[cfg(feature = "time-buffer")]
+            time_buf_pos: 0.0,
             sample_rate,
         }
     }
@@ -86,6 +90,10 @@ impl Voice {
         self.active = true;
         self.age = 0;
         self.time_elapsed = 0.0;
+        #[cfg(feature = "time-buffer")]
+        {
+            self.time_buf_pos = 0.0;
+        }
     }
 
     #[inline]
@@ -229,6 +237,56 @@ impl Voice {
             self.active = false;
         }
 
+        (left, right)
+    }
+
+    /// Buffer-based time-domain synthesis: reads from a pre-rendered
+    /// buffer with rate adjustment for pitch shifting.
+    #[cfg(feature = "time-buffer")]
+    #[inline]
+    pub fn process_time_buffer(&mut self, time_buf: &[f32]) -> (f32, f32) {
+        if !self.active || time_buf.is_empty() {
+            return (0.0, 0.0);
+        }
+
+        if (self.inc_target - self.inc).abs() > 0.0001 {
+            self.inc = self.inc * self.glide_rate + self.inc_target * (1.0 - self.glide_rate);
+        }
+
+        let inc_a4 = Voice::note_to_inc(69, self.sample_rate);
+        let advance = if inc_a4 > 0.0 { self.inc / inc_a4 } else { 1.0 };
+
+        self.time_buf_pos += advance;
+        let buf_len = time_buf.len() as f32;
+        while self.time_buf_pos >= buf_len {
+            self.time_buf_pos -= buf_len;
+        }
+        while self.time_buf_pos < 0.0 {
+            self.time_buf_pos += buf_len;
+        }
+
+        let idx = self.time_buf_pos as usize;
+        let frac = self.time_buf_pos - idx as f32;
+        let a = time_buf[idx];
+        let b = time_buf[(idx + 1) % time_buf.len()];
+        let sample = a + (b - a) * frac;
+
+        let mut left = sample;
+        let mut right = sample;
+
+        let env_val = self.env.tick();
+        let amp = env_val * self.cur_velocity * self.cur_velocity;
+        left *= amp;
+        right *= amp;
+        (left, right) = self.filt.process_stereo(left, right);
+        left = left.clamp(-4.0, 4.0);
+        right = right.clamp(-4.0, 4.0);
+
+        self.age += 1;
+        self.time_elapsed += 1.0 / self.sample_rate;
+        if self.finished() {
+            self.active = false;
+        }
         (left, right)
     }
 }

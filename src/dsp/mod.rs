@@ -9,6 +9,8 @@ use crate::script::ScriptMode;
 use crate::wavetable::{SharedWavetable, WAVETABLE_SIZE};
 use arc_swap::ArcSwap;
 use smallvec::SmallVec;
+#[cfg(feature = "time-buffer")]
+use std::sync::Arc;
 
 pub const MAX_VOICES: usize = 16;
 
@@ -31,6 +33,28 @@ impl WavetableSlot {
 
     pub fn store(&self, table: SharedWavetable) {
         self.inner.store(table);
+    }
+}
+
+/// Lock-free slot for a pre-rendered time buffer.
+#[cfg(feature = "time-buffer")]
+pub struct TimeBufferSlot {
+    inner: ArcSwap<Vec<f32>>,
+}
+
+#[cfg(feature = "time-buffer")]
+impl TimeBufferSlot {
+    pub fn new(buf: Vec<f32>) -> Self {
+        Self {
+            inner: ArcSwap::from_pointee(buf),
+        }
+    }
+    #[inline]
+    pub fn load(&self) -> arc_swap::Guard<Arc<Vec<f32>>> {
+        self.inner.load()
+    }
+    pub fn store(&self, buf: Arc<Vec<f32>>) {
+        self.inner.store(buf);
     }
 }
 
@@ -202,6 +226,46 @@ impl SynthEngine {
         let l_out = (l * vol).tanh();
         let r_out = (r * vol).tanh();
         (l_out, r_out)
+    }
+
+    /// Buffer-based time-domain synthesis.
+    #[cfg(feature = "time-buffer")]
+    #[inline]
+    pub fn process_sample_buf(
+        &mut self,
+        wavetable: &SharedWavetable,
+        time_buf: Option<&[f32]>,
+    ) -> (f32, f32) {
+        match self.script_mode {
+            ScriptMode::Wavetable => {
+                let data = wavetable.as_ref();
+                let n = self.unison_voices;
+                let mut l = 0.0;
+                let mut r = 0.0;
+                for v in self.voices.iter_mut() {
+                    let (vl, vr) = v.process(data, n);
+                    l += vl;
+                    r += vr;
+                }
+                let vol = self.volume;
+                ((l * vol).tanh(), (r * vol).tanh())
+            }
+            ScriptMode::TimeBased => {
+                if let Some(buf) = time_buf {
+                    let mut l = 0.0;
+                    let mut r = 0.0;
+                    for v in self.voices.iter_mut() {
+                        let (vl, vr) = v.process_time_buffer(buf);
+                        l += vl;
+                        r += vr;
+                    }
+                    let vol = self.volume;
+                    ((l * vol).tanh(), (r * vol).tanh())
+                } else {
+                    (0.0, 0.0)
+                }
+            }
+        }
     }
 
     pub fn set_sample_rate(&mut self, sr: f32) {

@@ -16,7 +16,8 @@
 //!
 //! The engine exposes DSP-friendly functions in two modules:
 //! - `math.*` — standard math: `sin`, `cos`, `exp`, `pi`, etc.
-//! - `dsp.*` — custom waveshaping: `saw`, `square`, `triangle`, `noise`, `fold`, `clip`, `lerp`, `rand`
+//! - `dsp.*` — custom waveshaping: `saw`, `square`, `triangle`, `noise`, `fold`, `clip`
+//! - `math.*` — standard + utility: `sin`, `cos`, `exp`, `lerp`, `rand`, `min`, `max`, etc.
 //!
 //! Example patches (wavetable mode):
 //! - `math.sin(x) + math.sin(x*3)*0.25`
@@ -100,17 +101,23 @@ fn clip(x: f32, level: f32) -> f32 {
     x.clamp(-level, level)
 }
 
-fn lerp(args: Variadic<f32>) -> f32 {
-    let n = args.len();
-    if n < 2 {
-        return args.first().copied().unwrap_or(0.0);
+/// Lua-facing lerp: `math.lerp(table, t)` where `table` is an array of
+/// values and `t` is the interpolation factor in [0, 1].
+fn lerp_table(table: mlua::Table, t: f32) -> mlua::Result<f32> {
+    let t = t.clamp(0.0, 1.0);
+    let len = table.len()? as usize;
+    if len == 0 {
+        return Ok(0.0);
     }
-    let t_idx = n - 1;
-    let t = args[t_idx].clamp(0.0, 1.0);
-    let pos = t * (t_idx as f32);
-    let idx = (pos.floor() as usize).min(t_idx.saturating_sub(1));
+    if len == 1 {
+        return Ok(table.get::<f32>(1)?);
+    }
+    let pos = t * (len - 1) as f32;
+    let idx = (pos.floor() as usize).min(len - 2);
     let frac = pos - idx as f32;
-    args[idx] + (args[idx + 1] - args[idx]) * frac
+    let a: f32 = table.get(idx + 1)?;
+    let b: f32 = table.get(idx + 2)?;
+    Ok(a + (b - a) * frac)
 }
 
 /// Register custom oscillator DSP functions as a `dsp` Lua module.
@@ -210,11 +217,19 @@ fn register_math_table(lua: &Lua) -> mlua::Result<()> {
 
     math.set(
         "lerp",
-        lua.create_function(|_, args: Variadic<f32>| Ok(lerp(args)))?,
+        lua.create_function(|_, (table, t): (mlua::Table, f32)| lerp_table(table, t))?,
     )?;
     math.set(
         "rand",
         lua.create_function(|_, ()| Ok(rand::random::<f32>()))?,
+    )?;
+    math.set(
+        "min",
+        lua.create_function(|_, (a, b): (f32, f32)| Ok(a.min(b)))?,
+    )?;
+    math.set(
+        "max",
+        lua.create_function(|_, (a, b): (f32, f32)| Ok(a.max(b)))?,
     )?;
 
     lua.globals().set("math", math)?;
@@ -265,6 +280,76 @@ impl LuaContext {
     pub fn eval_t(&self, t: f32) -> f32 {
         self.func.call::<f32>((t,)).unwrap_or(0.0)
     }
+}
+
+/// Duration of pre-rendered time buffers (seconds).
+#[cfg(feature = "time-buffer")]
+pub const TIME_BUFFER_DURATION: f32 = 8.0;
+
+/// Generate a time-domain buffer by evaluating the Lua expression at
+/// regular time intervals using parallel rayon chunks.  Each thread
+/// gets its own LuaJIT instance so evaluation is lock-free.
+#[cfg(feature = "time-buffer")]
+pub fn generate_time_buffer(source: &str, sample_rate: f32) -> Result<Vec<f32>, String> {
+    use rayon::prelude::*;
+    use std::sync::Mutex;
+
+    // Validate the script once first.
+    let lua = Lua::new();
+    register_dsp_table(&lua).map_err(|e| format!("Init: {e}"))?;
+    register_math_table(&lua).map_err(|e| format!("Init: {e}"))?;
+    let wrapped = wrap_script(source, "t");
+    lua.load(&wrapped)
+        .eval::<Value>()
+        .map_err(|e| format!("Compile: {e}"))?;
+    drop(lua);
+
+    let len = (sample_rate * TIME_BUFFER_DURATION) as usize;
+    let inv_sr = 1.0 / sample_rate;
+    let mut data: Vec<f32> = vec![0.0; len];
+
+    let num_threads = rayon::current_num_threads();
+    let chunk_size = (len / num_threads).max(4096);
+    let first_err: Mutex<Option<String>> = Mutex::new(None);
+
+    data.par_chunks_mut(chunk_size)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+            // Each thread creates its own Lua instance.
+            let tlua = Lua::new();
+            if register_dsp_table(&tlua).is_err() || register_math_table(&tlua).is_err() {
+                return;
+            }
+            let func: Function = match tlua.load(&wrapped).eval() {
+                Ok(f) => f,
+                Err(e) => {
+                    let mut g = first_err.lock().unwrap();
+                    if g.is_none() {
+                        *g = Some(format!("Compile: {e}"));
+                    }
+                    return;
+                }
+            };
+
+            let base = chunk_idx * chunk_size;
+            for (j, s) in chunk.iter_mut().enumerate() {
+                let t = (base + j) as f32 * inv_sr;
+                *s = func.call::<f32>((t,)).unwrap_or(0.0).clamp(-4.0, 4.0);
+            }
+        });
+
+    if let Some(err) = first_err.into_inner().unwrap() {
+        return Err(err);
+    }
+
+    // Normalize.
+    let peak = data.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
+    if peak > 1e-10 {
+        let scale = 1.0 / peak;
+        data.par_iter_mut().for_each(|s| *s *= scale);
+    }
+
+    Ok(data)
 }
 
 /// Thread-safe wrapper for deferred compilation.

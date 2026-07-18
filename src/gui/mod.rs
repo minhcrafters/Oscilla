@@ -1,5 +1,7 @@
 use crate::OscillaParams;
 use crate::OscillaTask;
+#[cfg(feature = "time-buffer")]
+use crate::dsp::TimeBufferSlot;
 use crate::dsp::WavetableSlot;
 use crate::dsp::filter::FilterType;
 use crate::script::{ScriptCompiler, ScriptMode};
@@ -20,7 +22,7 @@ use nice_plug_iced::iced::{
     widget::{
         Column, Container, Row, Space, button,
         canvas::{self, Canvas, Frame, Geometry, Program},
-        column, container, pick_list, row, text,
+        column, container, mouse_area, pick_list, row, text,
     },
 };
 use nice_plug_iced::{EditorState, NiceGuiContext};
@@ -204,6 +206,7 @@ pub enum Message {
     EditorEvent(iced_code_editor::Message),
     CompileScript,
     SelectAll,
+    LoseEditorFocus,
 
     VolumeGestured(Gesture),
     AttackGestured(Gesture),
@@ -227,6 +230,8 @@ pub struct OscillaEditorState {
     pub params: Arc<OscillaParams>,
     pub wavetable_slot: Arc<WavetableSlot>,
     pub lua_source_slot: Arc<ArcSwap<String>>,
+    #[cfg(feature = "time-buffer")]
+    pub time_buffer_slot: Arc<TimeBufferSlot>,
     pub peak_output: Arc<AtomicF32>,
     pub scope_buffer: Arc<Mutex<Box<[f32; SCOPE_SIZE]>>>,
     pub notifier: PollSubNotifier,
@@ -347,7 +352,6 @@ impl OscillaGui {
             Message::Poll => {
                 self.peak_output_db =
                     util::gain_to_db(self.editor_state.peak_output.load(Ordering::Relaxed));
-                // Always check for errors
                 if let Some(err) = self.editor_state.compiler.take_last_error() {
                     self.compile_pending = false;
                     self.compile_ok = false;
@@ -364,6 +368,10 @@ impl OscillaGui {
             Message::EditorEvent(event) => {
                 CodeEditor::update(&mut self.editor_state.editor_handle, &event)
                     .map(Message::EditorEvent)
+            }
+            Message::LoseEditorFocus => {
+                self.editor_state.editor_handle.lose_focus();
+                Task::none()
             }
             Message::SelectAll => {
                 let editor = &mut self.editor_state.editor_handle;
@@ -401,7 +409,6 @@ impl OscillaGui {
                     _ => ScriptMode::TimeBased,
                 };
                 *self.editor_state.params.wave_script.borrow_mut() = src.clone();
-                // Clear any stale error before kicking off new compilation.
                 self.editor_state.compiler.take_last_error();
                 self.status_message = String::from("Compiling...");
                 self.compile_ok = true;
@@ -411,77 +418,65 @@ impl OscillaGui {
                     mode,
                 });
 
+                self.editor_state.editor_handle.lose_focus();
                 Task::none()
             }
             Message::VolumeGestured(g) => {
                 iced_audio::param::set_nice_param(&p.volume, g, &setter);
-
-                Task::none()
+                Task::done(Message::LoseEditorFocus)
             }
             Message::AttackGestured(g) => {
                 iced_audio::param::set_nice_param(&p.attack, g, &setter);
-
-                Task::none()
+                Task::done(Message::LoseEditorFocus)
             }
             Message::DecayGestured(g) => {
                 iced_audio::param::set_nice_param(&p.decay, g, &setter);
-
-                Task::none()
+                Task::done(Message::LoseEditorFocus)
             }
             Message::SustainGestured(g) => {
                 iced_audio::param::set_nice_param(&p.sustain, g, &setter);
-
-                Task::none()
+                Task::done(Message::LoseEditorFocus)
             }
             Message::ReleaseGestured(g) => {
                 iced_audio::param::set_nice_param(&p.release, g, &setter);
-
-                Task::none()
+                Task::done(Message::LoseEditorFocus)
             }
             Message::CutoffGestured(g) => {
                 iced_audio::param::set_nice_param(&p.filter_cutoff, g, &setter);
-
-                Task::none()
+                Task::done(Message::LoseEditorFocus)
             }
             Message::ResonanceGestured(g) => {
                 iced_audio::param::set_nice_param(&p.filter_resonance, g, &setter);
-
-                Task::none()
+                Task::done(Message::LoseEditorFocus)
             }
             Message::UnisonVoicesGestured(g) => {
                 iced_audio::param::set_nice_param(&p.unison_voices, g, &setter);
-
-                Task::none()
+                Task::done(Message::LoseEditorFocus)
             }
             Message::DetuneGestured(g) => {
                 iced_audio::param::set_nice_param(&p.detune_cents, g, &setter);
-
-                Task::none()
+                Task::done(Message::LoseEditorFocus)
             }
             Message::WidthGestured(g) => {
                 iced_audio::param::set_nice_param(&p.stereo_width, g, &setter);
-
-                Task::none()
+                Task::done(Message::LoseEditorFocus)
             }
             Message::GlideGestured(g) => {
                 iced_audio::param::set_nice_param(&p.glide_time, g, &setter);
-
-                Task::none()
+                Task::done(Message::LoseEditorFocus)
             }
             Message::FilterTypeChanged(ft) => {
                 setter.begin_set_parameter(&p.filter_type);
                 setter.set_parameter_normalized(&p.filter_type, ft as i32 as f32 / 2.0);
                 setter.end_set_parameter(&p.filter_type);
-
-                Task::none()
+                Task::done(Message::LoseEditorFocus)
             }
             Message::ScriptModeChanged(mode) => {
                 let val = mode as i32 as f32 / 1.0;
                 setter.begin_set_parameter(&p.script_mode);
                 setter.set_parameter_normalized(&p.script_mode, val);
                 setter.end_set_parameter(&p.script_mode);
-
-                Task::none()
+                Task::done(Message::LoseEditorFocus)
             }
         }
     }
@@ -583,10 +578,15 @@ impl OscillaGui {
         .width(Length::Fill)
         .height(Length::Fill);
 
-        let preview_panel = container(preview)
-            .style(|_| section_panel())
-            .padding(12)
-            .width(Length::Fill);
+        let preview_panel = container(
+            mouse_area(
+                container(preview)
+                    .style(|_| section_panel())
+                    .padding(12)
+                    .width(Length::Fill),
+            )
+            .on_press(Message::LoseEditorFocus),
+        );
 
         // Envelope
         let envelope = section(
@@ -749,16 +749,19 @@ impl OscillaGui {
         .spacing(10)
         .width(Length::FillPortion(3));
 
-        let right = column![
-            envelope.height(Length::Fill),
-            filter.height(Length::Fill),
-            unison.height(Length::Fill),
-            master.height(Length::Fill),
-            footer,
-        ]
-        .spacing(10)
-        .width(Length::FillPortion(2))
-        .height(Length::Fill);
+        let right = mouse_area(
+            column![
+                envelope.height(Length::Fill),
+                filter.height(Length::Fill),
+                unison.height(Length::Fill),
+                master.height(Length::Fill),
+                footer,
+            ]
+            .spacing(10)
+            .width(Length::FillPortion(2))
+            .height(Length::Fill),
+        )
+        .on_press(Message::LoseEditorFocus);
 
         container(row![left, right].spacing(12).padding(12))
             .style(|_| container::Style {
@@ -778,7 +781,6 @@ impl OscillaGui {
 
 struct WaveformPreview {
     wavetable: SharedWavetable,
-    /// Snapshot of the oscilloscope ring buffer for this frame.
     scope_snapshot: Box<[f32; SCOPE_SIZE]>,
     mode: ScriptMode,
     accent: Color,
@@ -838,8 +840,6 @@ impl Program<Message> for WaveformPreview {
             }
             ScriptMode::TimeBased => {
                 let data = self.scope_snapshot.as_ref();
-                // Draw the oscilloscope trace: map the 512-sample window
-                // across the preview width, centred vertically.
                 let n = data.len() as f32;
                 let step = (n / w).max(1.0);
                 while i < n {

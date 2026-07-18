@@ -3674,6 +3674,7 @@ dependencies = [
  "nice-plug",
  "nice-plug-iced",
  "rand 0.10.2",
+ "rayon",
  "realfft",
  "rustfft",
  "smallvec",

@@ -10,6 +10,8 @@ pub mod preset;
 pub mod script;
 pub mod wavetable;
 
+#[cfg(feature = "time-buffer")]
+use crate::dsp::TimeBufferSlot;
 use crate::dsp::filter::FilterType;
 use crate::dsp::{SynthEngine, WavetableSlot};
 use crate::gui::EditorHandle;
@@ -32,6 +34,9 @@ pub struct Oscilla {
     wavetable_slot: Arc<WavetableSlot>,
     /// Compiled Lua source code for time-based mode, swapped atomically.
     lua_source_slot: Arc<ArcSwap<String>>,
+    /// Pre-rendered time buffer (only with `time-buffer` feature).
+    #[cfg(feature = "time-buffer")]
+    time_buffer_slot: Arc<TimeBufferSlot>,
     compiler: Arc<ScriptCompiler>,
     peak_output: Arc<AtomicF32>,
     scope_buffer: Arc<Mutex<Box<[f32; SCOPE_SIZE]>>>,
@@ -61,6 +66,13 @@ impl Default for Oscilla {
             lua_source_slot: Arc::new(ArcSwap::from_pointee(String::from(
                 "math.sin(t * math.pi * 2 * 440)",
             ))),
+            #[cfg(feature = "time-buffer")]
+            time_buffer_slot: {
+                let buf =
+                    crate::script::generate_time_buffer("math.sin(t * math.pi * 2 * 440)", 44100.0)
+                        .unwrap_or_else(|_| vec![0.0f32; 44100]);
+                Arc::new(TimeBufferSlot::new(buf))
+            },
             compiler: Arc::new(ScriptCompiler::new()),
             peak_output: Arc::new(AtomicF32::new(0.0)),
             scope_buffer: Arc::new(Mutex::new(Box::new([0.0f32; SCOPE_SIZE]))),
@@ -296,42 +308,61 @@ impl Plugin for Oscilla {
 
     fn task_executor(&mut self) -> Box<dyn Fn(Self::BackgroundTask) + Send> {
         let wt_slot = self.wavetable_slot.clone();
+        #[cfg(not(feature = "time-buffer"))]
         let lua_slot = self.lua_source_slot.clone();
+        #[cfg(feature = "time-buffer")]
+        let tb_slot = self.time_buffer_slot.clone();
         let compiler = self.compiler.clone();
         let notifier = self.notifier.clone();
+        #[cfg(feature = "time-buffer")]
+        let sr = self.sample_rate.clone();
 
         Box::new(move |task| match task {
-            OscillaTask::CompileScript { source, mode } => {
-                match compiler.compile(&source, mode) {
-                    Ok(()) => match mode {
-                        ScriptMode::Wavetable => {
-                            // Generate wavetable from Lua evaluation.
-                            match LuaContext::compile(&source, ScriptMode::Wavetable) {
-                                Ok(ctx) => {
-                                    let wt = generate_wavetable_from_lua(&ctx);
-                                    wt_slot.store(wt);
+            OscillaTask::CompileScript { source, mode } => match compiler.compile(&source, mode) {
+                Ok(()) => match mode {
+                    ScriptMode::Wavetable => {
+                        match LuaContext::compile(&source, ScriptMode::Wavetable) {
+                            Ok(ctx) => {
+                                let wt = generate_wavetable_from_lua(&ctx);
+                                wt_slot.store(wt);
+                                notifier.notify();
+                            }
+                            Err(e) => {
+                                log::error!("Oscilla: Lua eval error: {e}");
+                                compiler.store_error(e);
+                                notifier.notify();
+                            }
+                        }
+                    }
+                    ScriptMode::TimeBased => {
+                        #[cfg(feature = "time-buffer")]
+                        {
+                            let rate = sr.load(Ordering::Relaxed);
+                            match crate::script::generate_time_buffer(&source, rate) {
+                                Ok(buf) => {
+                                    tb_slot.store(Arc::new(buf));
                                     notifier.notify();
                                 }
                                 Err(e) => {
-                                    log::error!("Oscilla: Lua eval error: {e}");
+                                    log::error!("Oscilla: buffer gen: {e}");
                                     compiler.store_error(e);
                                     notifier.notify();
                                 }
                             }
                         }
-                        ScriptMode::TimeBased => {
-                            // Store the Lua source for real-time evaluation.
+                        #[cfg(not(feature = "time-buffer"))]
+                        {
                             lua_slot.store(Arc::new(source.clone()));
                             notifier.notify();
                         }
-                    },
-                    Err(e) => {
-                        log::error!("Oscilla: script compile: {e}");
-                        compiler.store_error(e);
-                        notifier.notify();
                     }
+                },
+                Err(e) => {
+                    log::error!("Oscilla: script compile: {e}");
+                    compiler.store_error(e);
+                    notifier.notify();
                 }
-            }
+            },
         })
     }
 
@@ -343,6 +374,8 @@ impl Plugin for Oscilla {
             params: self.params.clone(),
             wavetable_slot: self.wavetable_slot.clone(),
             lua_source_slot: self.lua_source_slot.clone(),
+            #[cfg(feature = "time-buffer")]
+            time_buffer_slot: self.time_buffer_slot.clone(),
             peak_output: self.peak_output.clone(),
             scope_buffer: self.scope_buffer.clone(),
             notifier: self.notifier.clone(),
@@ -423,7 +456,10 @@ impl Plugin for Oscilla {
         self.engine.script_mode = mode;
 
         let script = self.params.wave_script.borrow().clone();
+        #[cfg(not(feature = "time-buffer"))]
         let mut lua_ctx: Option<LuaContext> = None;
+        #[cfg(feature = "time-buffer")]
+        let time_buf_guard = self.time_buffer_slot.load();
 
         if script != self.last_compiled {
             match self.compiler.compile(&script, mode) {
@@ -441,7 +477,23 @@ impl Plugin for Oscilla {
                         }
                     }
                     ScriptMode::TimeBased => {
-                        self.lua_source_slot.store(Arc::new(script.clone()));
+                        #[cfg(feature = "time-buffer")]
+                        {
+                            let rate = self.sample_rate.load(Ordering::Relaxed);
+                            match crate::script::generate_time_buffer(&script, rate) {
+                                Ok(buf) => {
+                                    self.time_buffer_slot.store(Arc::new(buf));
+                                }
+                                Err(e) => {
+                                    log::error!("Oscilla: buffer gen: {e}");
+                                    self.compiler.store_error(e);
+                                }
+                            }
+                        }
+                        #[cfg(not(feature = "time-buffer"))]
+                        {
+                            self.lua_source_slot.store(Arc::new(script.clone()));
+                        }
                     }
                 },
                 Err(e) => {
@@ -453,6 +505,7 @@ impl Plugin for Oscilla {
         }
 
         // For time-based mode, compile the Lua context once per block.
+        #[cfg(not(feature = "time-buffer"))]
         if mode == ScriptMode::TimeBased {
             let src = self.lua_source_slot.load_full();
             lua_ctx = LuaContext::compile(&src, ScriptMode::TimeBased).ok();
@@ -507,6 +560,15 @@ impl Plugin for Oscilla {
 
             self.engine.set_volume(self.params.volume.smoothed.next());
 
+            #[cfg(feature = "time-buffer")]
+            let (l, r) = self.engine.process_sample_buf(
+                &table,
+                match mode {
+                    ScriptMode::TimeBased => Some(&time_buf_guard),
+                    ScriptMode::Wavetable => None,
+                },
+            );
+            #[cfg(not(feature = "time-buffer"))]
             let (l, r) = self.engine.process_sample(&table, lua_ctx.as_ref());
 
             let mut ch = channel_samples.into_iter();
