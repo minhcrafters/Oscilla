@@ -65,7 +65,7 @@ impl Default for Oscilla {
             engine: SynthEngine::new(sample_rate.load(Ordering::Relaxed)),
             wavetable_slot: Arc::new(WavetableSlot::new(Arc::new(default_table))),
             lua_source_slot: Arc::new(ArcSwap::from_pointee(String::from(
-                "math.sin(t * math.pi * 2 * 440)",
+                "function main(t)\n    return math.sin(t * math.pi * 2 * 440)\nend",
             ))),
             #[cfg(feature = "time-buffer")]
             time_buffer_slot: {
@@ -270,7 +270,9 @@ impl Default for OscillaParams {
 
             script_mode: IntParam::new("Script Mode", 0, IntRange::Linear { min: 0, max: 1 }),
 
-            wave_script: AtomicRefCell::new(String::from("math.sin(x)")),
+            wave_script: AtomicRefCell::new(String::from(
+                "function main(x)\n    return math.sin(x)\nend",
+            )),
         }
     }
 }

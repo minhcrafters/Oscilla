@@ -500,6 +500,25 @@ impl OscillaGui {
                 setter.begin_set_parameter(&p.script_mode);
                 setter.set_parameter_normalized(&p.script_mode, val);
                 setter.end_set_parameter(&p.script_mode);
+
+                // Swap default template when switching modes.
+                let current = self.editor_state.editor_handle.content();
+                let wt_default = "function main(x)\n    return math.sin(x)\nend";
+                let tb_default =
+                    "function main(t)\n    return math.sin(t * math.pi * 2 * 440)\nend";
+                let replacement = match mode {
+                    ScriptMode::TimeBased if current.trim() == wt_default.trim() => {
+                        Some(tb_default)
+                    }
+                    ScriptMode::Wavetable if current.trim() == tb_default.trim() => {
+                        Some(wt_default)
+                    }
+                    _ => None,
+                };
+                if let Some(template) = replacement {
+                    let _ = self.editor_state.editor_handle.reset(template);
+                }
+
                 Task::done(Message::LoseEditorFocus)
             }
             Message::SavePreset => {
@@ -608,6 +627,10 @@ impl OscillaGui {
         Preset {
             name: name.into(),
             wave_script: self.editor_state.editor_handle.content(),
+            script_mode: match p.script_mode.modulated_plain_value() {
+                0 => "wavetable".into(),
+                _ => "time".into(),
+            },
             filter_type: match p.filter_type.modulated_plain_value() {
                 0 => FilterType::LowPass,
                 1 => FilterType::HighPass,
@@ -685,6 +708,16 @@ impl OscillaGui {
         let glide_norm = (preset.glide / 2.0).clamp(0.0, 1.0);
         setter.set_parameter_normalized(&p.glide_time, glide_norm);
         setter.end_set_parameter(&p.glide_time);
+
+        // Set script mode.
+        let mode_val: f32 = if preset.script_mode == "time" {
+            1.0
+        } else {
+            0.0
+        };
+        setter.begin_set_parameter(&p.script_mode);
+        setter.set_parameter_normalized(&p.script_mode, mode_val / 1.0);
+        setter.end_set_parameter(&p.script_mode);
 
         // Update the code editor with the preset's wave script.
         let _ = self.editor_state.editor_handle.reset(&preset.wave_script);

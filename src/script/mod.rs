@@ -20,14 +20,14 @@
 //! - `math.*` — standard + utility: `sin`, `cos`, `exp`, `lerp`, `rand`, `min`, `max`, etc.
 //!
 //! Example patches (wavetable mode):
-//! - `math.sin(x) + math.sin(x*3)*0.25`
-//! - `math.tanh(dsp.saw(x) + dsp.noise(x)*0.05)`
-//! - `dsp.fold(math.sin(x*2), 0.5)`
+//! - `function main(x) return math.sin(x) + math.sin(x*3)*0.25 end`
+//! - `function main(x) return math.tanh(dsp.saw(x) + dsp.noise(x)*0.05) end`
+//! - `function main(x) return dsp.fold(math.sin(x*2), 0.5) end`
 //!
 //! Example patches (time-based mode):
-//! - `math.sin(t * math.pi * 2 * 440)`           — 440 Hz sine
-//! - `math.sin(t * math.pi * 2 * 55) * math.sin(t * math.pi * 2 * 66)` — ring-mod bell
-//! - `math.sin(t * math.pi * 2 * 220) * math.exp(-t * 3)` — percussive pluck
+//! - `function main(t) return math.sin(t * math.pi * 2 * 440) end`
+//! - `function main(t) return math.sin(t * math.pi * 2 * 55) * math.sin(t * math.pi * 2 * 66) end`
+//! - `function main(t) return math.sin(t * math.pi * 2 * 220) * math.exp(-t * 3) end`
 //!
 
 use mlua::{Function, Lua, Value, Variadic};
@@ -174,19 +174,12 @@ pub fn validate_script(source: &str) -> Result<(), String> {
 
 /// Wrap user source into a callable Lua function.
 ///
-/// Simple one-liners like `math.sin(x)` are wrapped as `return <expr>`.
-/// Multi-line scripts with `local`, explicit `return`, or newlines
-/// are used as the raw function body.
+/// The user's source is the body of a wrapper function.  Any code
+/// outside `function main(var)` (globals, helpers) runs once at
+/// compile time.  The wrapper automatically calls `main(var)` to
+/// produce each sample.
 fn wrap_script(source: &str, var: &str) -> String {
-    let trimmed = source.trim();
-    let is_multi =
-        trimmed.contains('\n') || trimmed.starts_with("local") || trimmed.starts_with("return");
-
-    if is_multi {
-        format!("return function({var})\n{source}\nend")
-    } else {
-        format!("return function({var})\nreturn {source}\nend")
-    }
+    format!("return function({var})\n{source}\nreturn main({var})\nend")
 }
 
 /// Register `math.sin`, `math.pi`, etc. as a `math` global table.
@@ -419,20 +412,22 @@ mod tests {
 
     #[test]
     fn test_sine_validate() {
-        assert!(validate_script("math.sin(x)").is_ok());
+        let src = "function main(x)\n    return math.sin(x)\nend";
+        assert!(validate_script(src).is_ok());
     }
 
     #[test]
     fn test_sine_context() {
-        let ctx = LuaContext::compile("math.sin(x)", ScriptMode::Wavetable).unwrap();
+        let src = "function main(x)\n    return math.sin(x)\nend";
+        let ctx = LuaContext::compile(src, ScriptMode::Wavetable).unwrap();
         let val = ctx.eval_x(std::f32::consts::PI / 2.0);
         assert!((val - 1.0).abs() < 0.01);
     }
 
     #[test]
     fn test_sine_time() {
-        let ctx =
-            LuaContext::compile("math.sin(t * math.pi * 2 * 440)", ScriptMode::TimeBased).unwrap();
+        let src = "function main(t)\n    return math.sin(t * math.pi * 2 * 440)\nend";
+        let ctx = LuaContext::compile(src, ScriptMode::TimeBased).unwrap();
         assert!(ctx.eval_t(0.0).abs() < 0.001);
         let t = 1.0 / (4.0 * 440.0);
         assert!((ctx.eval_t(t) - 1.0).abs() < 0.01);
@@ -440,44 +435,40 @@ mod tests {
 
     #[test]
     fn test_complex() {
-        let ctx =
-            LuaContext::compile("math.sin(x) + math.sin(x*3)*0.25", ScriptMode::Wavetable).unwrap();
+        let src = "function main(x)\n    return math.sin(x) + math.sin(x*3)*0.25\nend";
+        let ctx = LuaContext::compile(src, ScriptMode::Wavetable).unwrap();
         ctx.eval_x(1.0);
     }
 
     #[test]
     fn test_dsp_functions() {
-        for expr in &[
-            "dsp.saw(x)",
-            "dsp.triangle(x)",
-            "dsp.noise(x)",
-            "dsp.square(x)",
-            "dsp.square(x, 0.3)",
-            "dsp.fold(math.sin(x*2), 0.5)",
-            "dsp.clip(x, 0.5)",
-            "math.rand()",
+        for (expr, label) in &[
+            ("dsp.saw(x)", "saw"),
+            ("dsp.triangle(x)", "triangle"),
+            ("dsp.noise(x)", "noise"),
+            ("dsp.square(x)", "square"),
+            ("dsp.square(x, 0.3)", "square_pw"),
+            ("dsp.fold(math.sin(x*2), 0.5)", "fold"),
+            ("dsp.clip(x, 0.5)", "clip"),
+            ("math.rand()", "rand"),
         ] {
-            assert!(validate_script(expr).is_ok(), "failed to validate: {expr}");
+            let src = format!("function main(x)\n    return {expr}\nend");
+            assert!(validate_script(&src).is_ok(), "failed: {label}");
         }
     }
 
     #[test]
     fn test_time_am() {
-        let ctx = LuaContext::compile(
-            "math.sin(t * math.pi * 2 * 55) * math.sin(t * math.pi * 2 * 66) * math.exp(-t * 3)",
-            ScriptMode::TimeBased,
-        )
-        .unwrap();
+        let src = "function main(t)\n    return math.sin(t * math.pi * 2 * 55) * math.sin(t * math.pi * 2 * 66) * math.exp(-t * 3)\nend";
+        let ctx = LuaContext::compile(src, ScriptMode::TimeBased).unwrap();
         assert!(ctx.eval_t(0.0).abs() < 0.001);
     }
 
     #[test]
     fn test_time_decay() {
-        let ctx = LuaContext::compile(
-            "math.sin(t * math.pi * 2 * 220) * math.exp(-t * 3)",
-            ScriptMode::TimeBased,
-        )
-        .unwrap();
+        let src =
+            "function main(t)\n    return math.sin(t * math.pi * 2 * 220) * math.exp(-t * 3)\nend";
+        let ctx = LuaContext::compile(src, ScriptMode::TimeBased).unwrap();
         assert!(ctx.eval_t(0.0).abs() < 0.001);
         let v1 = ctx.eval_t(1.0);
         assert!(v1.abs() <= 1.0);
@@ -486,7 +477,6 @@ mod tests {
 
     #[test]
     fn test_multi_line_script() {
-        // User's FM synthesis example with local variables and math.*
         let source = r#"
 local freq = 440.0
 local fc = freq
@@ -496,24 +486,31 @@ local I0 = 5.0
 local Tc = 1.5
 local Tm = 0.08
 
-local carrier_env = math.exp(-t / Tc)
-local mod_env = math.exp(-t / Tm)
-
-local phase = 2.0 * math.pi * fc * t
-            + I0 * mod_env * math.sin(2.0 * math.pi * fm * t)
-
-return Ac * carrier_env * math.sin(phase)
+function main(t)
+    local carrier_env = math.exp(-t / Tc)
+    local mod_env = math.exp(-t / Tm)
+    local phase = 2.0 * math.pi * fc * t
+                + I0 * mod_env * math.sin(2.0 * math.pi * fm * t)
+    return Ac * carrier_env * math.sin(phase)
+end
 "#;
-        assert!(
-            validate_script(source).is_ok(),
-            "multi-line script should validate"
-        );
-
+        assert!(validate_script(source).is_ok());
         let ctx = LuaContext::compile(source, ScriptMode::TimeBased).unwrap();
-        // At t=0: envelope starts at 1, sin(0)=0 → output ≈ 0
         assert!(ctx.eval_t(0.0).abs() < 0.01);
-        // Should produce some non-zero output shortly after
         let val = ctx.eval_t(0.01);
         assert!(val.abs() > 0.0);
+    }
+
+    #[test]
+    fn test_main_function() {
+        let source = r#"
+function main(t)
+    return math.sin(t * math.pi * 2 * 440)
+end
+"#;
+        let ctx = LuaContext::compile(source, ScriptMode::TimeBased).unwrap();
+        assert!(ctx.eval_t(0.0).abs() < 0.001);
+        let t = 1.0 / (4.0 * 440.0);
+        assert!((ctx.eval_t(t) - 1.0).abs() < 0.01);
     }
 }

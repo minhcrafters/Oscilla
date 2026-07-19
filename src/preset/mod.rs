@@ -22,6 +22,7 @@ use crate::dsp::filter::FilterType;
 pub struct Preset {
     pub name: String,
     pub wave_script: String,
+    pub script_mode: String,
     pub filter_type: FilterType,
     pub filter_cutoff: f32,
     pub filter_resonance: f32,
@@ -40,7 +41,8 @@ impl Default for Preset {
     fn default() -> Self {
         Self {
             name: "Init".into(),
-            wave_script: "math.sin(x)".into(),
+            wave_script: "function main(x)\n    return math.sin(x)\nend".into(),
+            script_mode: "wavetable".into(),
             filter_type: FilterType::LowPass,
             filter_cutoff: 20000.0, // wide open
             filter_resonance: 0.0,
@@ -225,6 +227,11 @@ impl Preset {
                 "wave" => {
                     preset.wave_script = t.read_block()?;
                 }
+                "mode" => {
+                    if let Some(m) = t.read_word() {
+                        preset.script_mode = m;
+                    }
+                }
                 "filter" => {
                     let block = t.read_block()?;
                     let mut ft = Tokenizer::new(&block);
@@ -314,6 +321,7 @@ impl Preset {
              wave {{\n\
                  {wave}\n\
              }}\n\n\
+             mode      {mode:>8}\n\n\
              filter {{\n\
                  cutoff     {cutoff:>8.1}\n\
                  resonance  {res:>8.2}\n\
@@ -334,6 +342,7 @@ impl Preset {
              glide      {glide:>8.3}\n",
             name = self.name,
             wave = self.wave_script,
+            mode = self.script_mode,
             cutoff = self.filter_cutoff,
             res = self.filter_resonance,
             ft = ft_str,
