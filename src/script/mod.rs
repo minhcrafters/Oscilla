@@ -90,7 +90,11 @@ fn saw(x: f32) -> f32 {
 
 fn square_default(x: f32) -> f32 {
     let t = x / (2.0 * std::f32::consts::PI);
-    if t.fract() < 0.5 { 1.0 } else { -1.0 }
+    if t.fract() < 0.5 {
+        1.0
+    } else {
+        -1.0
+    }
 }
 
 fn square_pw(x: f32, pw: f32) -> f32 {

@@ -131,7 +131,11 @@ impl<'a> Tokenizer<'a> {
                 break;
             }
         }
-        if s.is_empty() { None } else { Some(s) }
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
     }
 
     fn read_quoted_string(&mut self) -> Result<String, ParseError> {
