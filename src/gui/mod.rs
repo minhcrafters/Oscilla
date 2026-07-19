@@ -429,10 +429,9 @@ impl OscillaGui {
             }
             Message::CompileScript => {
                 let src = self.editor_state.editor_handle.content();
-                let mode = match self.editor_state.params.script_mode.modulated_plain_value() {
-                    0 => ScriptMode::Wavetable,
-                    _ => ScriptMode::TimeBased,
-                };
+                let mode = ScriptMode::from_param_value(
+                    self.editor_state.params.script_mode.modulated_plain_value(),
+                );
                 *self.editor_state.params.wave_script.borrow_mut() = src.clone();
                 self.editor_state.compiler.take_last_error();
                 self.status_message = String::from("Compiling...");
@@ -492,12 +491,12 @@ impl OscillaGui {
             }
             Message::FilterTypeChanged(ft) => {
                 setter.begin_set_parameter(&p.filter_type);
-                setter.set_parameter_normalized(&p.filter_type, ft as i32 as f32 / 2.0);
+                setter.set_parameter_normalized(&p.filter_type, ft.to_param_normalized());
                 setter.end_set_parameter(&p.filter_type);
                 Task::done(Message::LoseEditorFocus)
             }
             Message::ScriptModeChanged(mode) => {
-                let val = mode as i32 as f32 / 1.0;
+                let val = mode.to_param_normalized();
                 setter.begin_set_parameter(&p.script_mode);
                 setter.set_parameter_normalized(&p.script_mode, val);
                 setter.end_set_parameter(&p.script_mode);
@@ -631,11 +630,7 @@ impl OscillaGui {
                 0 => "wavetable".into(),
                 _ => "time".into(),
             },
-            filter_type: match p.filter_type.modulated_plain_value() {
-                0 => FilterType::LowPass,
-                1 => FilterType::HighPass,
-                _ => FilterType::BandPass,
-            },
+            filter_type: FilterType::from_param_value(p.filter_type.modulated_plain_value()),
             filter_cutoff: p.filter_cutoff.modulated_plain_value(),
             filter_resonance: p.filter_resonance.modulated_plain_value(),
             attack: p.attack.modulated_plain_value(),
@@ -682,13 +677,8 @@ impl OscillaGui {
         setter.set_parameter_normalized(&p.filter_resonance, preset.filter_resonance);
         setter.end_set_parameter(&p.filter_resonance);
 
-        let ft_val = match preset.filter_type {
-            FilterType::LowPass => 0.0,
-            FilterType::HighPass => 1.0,
-            FilterType::BandPass => 2.0,
-        };
         setter.begin_set_parameter(&p.filter_type);
-        setter.set_parameter_normalized(&p.filter_type, ft_val / 2.0);
+        setter.set_parameter_normalized(&p.filter_type, preset.filter_type.to_param_normalized());
         setter.end_set_parameter(&p.filter_type);
 
         setter.begin_set_parameter(&p.unison_voices);
@@ -705,7 +695,7 @@ impl OscillaGui {
         setter.end_set_parameter(&p.stereo_width);
 
         setter.begin_set_parameter(&p.glide_time);
-        let glide_norm = (preset.glide / 2.0).clamp(0.0, 1.0);
+        let glide_norm = (preset.glide / 5.0).clamp(0.0, 1.0);
         setter.set_parameter_normalized(&p.glide_time, glide_norm);
         setter.end_set_parameter(&p.glide_time);
 
@@ -772,10 +762,7 @@ impl OscillaGui {
                 },
             });
 
-        let mode = match p.script_mode.modulated_plain_value() {
-            0 => ScriptMode::Wavetable,
-            _ => ScriptMode::TimeBased,
-        };
+        let mode = ScriptMode::from_param_value(p.script_mode.modulated_plain_value());
 
         let mode_picklist = pick_list(
             &[ScriptMode::Wavetable, ScriptMode::TimeBased][..],
@@ -912,11 +899,7 @@ impl OscillaGui {
         );
 
         // Filter
-        let ft = match p.filter_type.modulated_plain_value() {
-            0 => FilterType::LowPass,
-            1 => FilterType::HighPass,
-            _ => FilterType::BandPass,
-        };
+        let ft = FilterType::from_param_value(p.filter_type.modulated_plain_value());
         let freq = p.filter_cutoff.modulated_plain_value();
         let freq_str = if freq >= 1000.0 {
             format!("{:.1}k", freq / 1000.0)

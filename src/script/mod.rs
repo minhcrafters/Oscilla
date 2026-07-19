@@ -51,6 +51,24 @@ impl std::fmt::Display for ScriptMode {
     }
 }
 
+impl ScriptMode {
+    /// Convert from the integer parameter value (0 = Wavetable, 1 = TimeBased).
+    #[inline]
+    pub fn from_param_value(v: i32) -> Self {
+        if v <= 0 {
+            Self::Wavetable
+        } else {
+            Self::TimeBased
+        }
+    }
+
+    /// Convert to the normalized parameter value for the host.
+    #[inline]
+    pub fn to_param_normalized(self) -> f32 {
+        self as i32 as f32 // Wavetable=0, TimeBased=1
+    }
+}
+
 /// Default sine-based wavetable script.
 pub const DEFAULT_WAVETABLE_SCRIPT: &str = "function main(x)\n    return math.sin(x)\nend";
 

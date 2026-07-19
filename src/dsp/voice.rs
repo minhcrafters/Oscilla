@@ -69,10 +69,14 @@ impl Voice {
         self.note = note;
         self.velocity = vel;
 
-        if self.active && glide < 0.001 {
+        let no_glide = glide < 0.001;
+
+        if self.active && no_glide {
+            // Already playing, no glide: just retarget pitch without envelope retrigger.
             self.inc_target = target_inc;
             self.glide_rate = 1.0;
-        } else if !self.active || glide < 0.001 {
+        } else if !self.active {
+            // New voice: full reset with hard phase sync and envelope trigger.
             self.inc = target_inc;
             self.inc_target = target_inc;
             self.glide_rate = 1.0;
@@ -80,6 +84,7 @@ impl Voice {
             self.cur_velocity = vel;
             self.env.note_on();
         } else {
+            // Legato glide: slide pitch to target over glide time.
             self.inc_target = target_inc;
             let samples = (glide * sr).max(1.0);
             self.glide_rate = 1.0 - (1.0 / samples).min(0.999);

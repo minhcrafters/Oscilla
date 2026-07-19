@@ -33,6 +33,24 @@ impl std::fmt::Display for FilterType {
         }
     }
 }
+
+impl FilterType {
+    /// Convert from the integer parameter value (0 = LP, 1 = HP, 2 = BP).
+    #[inline]
+    pub fn from_param_value(v: i32) -> Self {
+        match v {
+            1 => Self::HighPass,
+            2 => Self::BandPass,
+            _ => Self::LowPass,
+        }
+    }
+
+    /// Convert to the normalized parameter value (0.0..1.0 for a 3-choice IntParam).
+    #[inline]
+    pub fn to_param_normalized(self) -> f32 {
+        self as i32 as f32 / 2.0
+    }
+}
 const STATE_BLOWUP_LIMIT: f32 = 1e6;
 
 /// Upper bound for `f` after halving for oversampling.

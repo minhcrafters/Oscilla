@@ -163,18 +163,18 @@ impl Default for OscillaParams {
         Self {
             window_state: nice_plug_iced::WindowState::from_logical_size(W, H),
 
-            volume: FloatParam::new("Volume", 0.5, FloatRange::Linear { min: 0.0, max: 1.0 })
+            volume: FloatParam::new("Volume", 0.75, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_smoother(SmoothingStyle::Linear(5.0))
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
 
             attack: FloatParam::new(
                 "Attack",
-                0.005,
+                0.01,
                 FloatRange::Skewed {
                     min: 0.001,
-                    max: 4.0,
-                    factor: FloatRange::skew_factor(-2.0),
+                    max: 10.0,
+                    factor: FloatRange::skew_factor(-1.0),
                 },
             )
             .with_smoother(SmoothingStyle::Linear(5.0))
@@ -187,8 +187,8 @@ impl Default for OscillaParams {
                 0.2,
                 FloatRange::Skewed {
                     min: 0.001,
-                    max: 4.0,
-                    factor: FloatRange::skew_factor(-2.0),
+                    max: 10.0,
+                    factor: FloatRange::skew_factor(-1.0),
                 },
             )
             .with_smoother(SmoothingStyle::Linear(5.0))
@@ -206,8 +206,8 @@ impl Default for OscillaParams {
                 0.4,
                 FloatRange::Skewed {
                     min: 0.001,
-                    max: 8.0,
-                    factor: FloatRange::skew_factor(-2.0),
+                    max: 10.0,
+                    factor: FloatRange::skew_factor(-1.0),
                 },
             )
             .with_smoother(SmoothingStyle::Linear(5.0))
@@ -221,7 +221,7 @@ impl Default for OscillaParams {
                 FloatRange::Skewed {
                     min: 20.0,
                     max: 20000.0,
-                    factor: FloatRange::skew_factor(-1.5),
+                    factor: FloatRange::skew_factor(-1.0),
                 },
             )
             .with_smoother(SmoothingStyle::Logarithmic(10.0))
@@ -275,8 +275,8 @@ impl Default for OscillaParams {
                 0.05,
                 FloatRange::Skewed {
                     min: 0.0,
-                    max: 2.0,
-                    factor: FloatRange::skew_factor(-1.5),
+                    max: 5.0,
+                    factor: FloatRange::skew_factor(-1.0),
                 },
             )
             .with_smoother(SmoothingStyle::Linear(5.0))
@@ -336,44 +336,19 @@ impl Plugin for Oscilla {
 
         Box::new(move |task| match task {
             OscillaTask::CompileScript { source, mode } => match compiler.compile(&source, mode) {
-                Ok(()) => match mode {
-                    ScriptMode::Wavetable => {
-                        match LuaContext::compile(&source, ScriptMode::Wavetable) {
-                            Ok(ctx) => {
-                                let wt = generate_wavetable_from_lua(&ctx);
-                                wt_slot.store(wt);
-                                notifier.notify();
-                            }
-                            Err(e) => {
-                                log::error!("Oscilla: Lua eval error: {e}");
-                                compiler.store_error(e);
-                                notifier.notify();
-                            }
-                        }
-                    }
-                    ScriptMode::TimeBased => {
-                        #[cfg(feature = "time-buffer")]
-                        {
-                            let rate = sr.load(Ordering::Relaxed);
-                            match crate::script::generate_time_buffer(&source, rate) {
-                                Ok(buf) => {
-                                    tb_slot.store(Arc::new(buf));
-                                    notifier.notify();
-                                }
-                                Err(e) => {
-                                    log::error!("Oscilla: buffer gen: {e}");
-                                    compiler.store_error(e);
-                                    notifier.notify();
-                                }
-                            }
-                        }
-                        #[cfg(not(feature = "time-buffer"))]
-                        {
-                            lua_slot.store(Arc::new(source.clone()));
-                            notifier.notify();
-                        }
-                    }
-                },
+                Ok(()) => compile_backend(
+                    &source,
+                    mode,
+                    &wt_slot,
+                    #[cfg(not(feature = "time-buffer"))]
+                    &lua_slot,
+                    #[cfg(feature = "time-buffer")]
+                    &tb_slot,
+                    &compiler,
+                    &notifier,
+                    #[cfg(feature = "time-buffer")]
+                    &sr,
+                ),
                 Err(e) => {
                     log::error!("Oscilla: script compile: {e}");
                     compiler.store_error(e);
@@ -559,17 +534,10 @@ impl Oscilla {
     /// Read mode and filter type from params and apply all block parameters.
     /// Returns the current script mode.
     fn apply_block_params(&mut self) -> ScriptMode {
-        let mode = match self.params.script_mode.modulated_plain_value() {
-            0 => ScriptMode::Wavetable,
-            _ => ScriptMode::TimeBased,
-        };
+        let mode = ScriptMode::from_param_value(self.params.script_mode.modulated_plain_value());
         self.engine.script_mode = mode;
 
-        let ft = match self.params.filter_type.modulated_plain_value() {
-            0 => FilterType::LowPass,
-            1 => FilterType::HighPass,
-            _ => FilterType::BandPass,
-        };
+        let ft = FilterType::from_param_value(self.params.filter_type.modulated_plain_value());
         self.engine.update_block_params(
             self.params.attack.smoothed.next(),
             self.params.decay.smoothed.next(),
@@ -638,6 +606,55 @@ fn generate_wavetable_from_lua(ctx: &LuaContext) -> crate::wavetable::SharedWave
     crate::wavetable::band_limit(&mut data, 200);
     crate::wavetable::normalize(&mut data);
     Arc::new(data)
+}
+
+/// Perform mode-specific compilation on a background thread.
+#[allow(clippy::too_many_arguments)]
+fn compile_backend(
+    source: &str,
+    mode: ScriptMode,
+    wt_slot: &WavetableSlot,
+    #[cfg(not(feature = "time-buffer"))] lua_slot: &ArcSwap<String>,
+    #[cfg(feature = "time-buffer")] tb_slot: &TimeBufferSlot,
+    compiler: &ScriptCompiler,
+    notifier: &PollSubNotifier,
+    #[cfg(feature = "time-buffer")] sr: &AtomicF32,
+) {
+    match mode {
+        ScriptMode::Wavetable => match LuaContext::compile(source, ScriptMode::Wavetable) {
+            Ok(ctx) => {
+                wt_slot.store(generate_wavetable_from_lua(&ctx));
+                notifier.notify();
+            }
+            Err(e) => {
+                log::error!("Oscilla: Lua eval error: {e}");
+                compiler.store_error(e);
+                notifier.notify();
+            }
+        },
+        ScriptMode::TimeBased => {
+            #[cfg(feature = "time-buffer")]
+            {
+                let rate = sr.load(Ordering::Relaxed);
+                match crate::script::generate_time_buffer(source, rate) {
+                    Ok(buf) => {
+                        tb_slot.store(Arc::new(buf));
+                        notifier.notify();
+                    }
+                    Err(e) => {
+                        log::error!("Oscilla: buffer gen: {e}");
+                        compiler.store_error(e);
+                        notifier.notify();
+                    }
+                }
+            }
+            #[cfg(not(feature = "time-buffer"))]
+            {
+                lua_slot.store(Arc::new(source.to_owned()));
+                notifier.notify();
+            }
+        }
+    }
 }
 
 // Format exports
