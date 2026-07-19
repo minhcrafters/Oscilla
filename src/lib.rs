@@ -37,15 +37,30 @@ pub struct Oscilla {
     /// Pre-rendered time buffer (only with `time-buffer` feature).
     #[cfg(feature = "time-buffer")]
     time_buffer_slot: Arc<TimeBufferSlot>,
+    /// Cached compiled Lua context for time-based mode, avoiding per-block recompilation.
+    /// Only ever accessed on the audio thread.
+    #[cfg(not(feature = "time-buffer"))]
+    cached_lua_ctx: Option<CachedLua>,
     compiler: Arc<ScriptCompiler>,
     peak_output: Arc<AtomicF32>,
     scope_buffer: Arc<Mutex<(Box<[f32; SCOPE_SIZE]>, usize)>>,
-    #[allow(dead_code)]
-    scope_write_pos: usize,
+    /// Next write position in the scope ring buffer, persisted across audio blocks.
+    next_scope_pos: usize,
     sample_rate: Arc<AtomicF32>,
     notifier: PollSubNotifier,
-    last_compiled: String,
 }
+
+/// Wrapper around `LuaContext` that asserts `Send` and `Sync`.
+///
+/// `LuaContext` contains `Rc` and is `!Send`, but this wrapper is only
+/// accessed from the audio thread. Follows the same pattern as `EditorHandle`.
+#[cfg(not(feature = "time-buffer"))]
+struct CachedLua(String, LuaContext);
+
+#[cfg(not(feature = "time-buffer"))]
+unsafe impl Send for CachedLua {}
+#[cfg(not(feature = "time-buffer"))]
+unsafe impl Sync for CachedLua {}
 
 // Background tasks
 
@@ -65,7 +80,7 @@ impl Default for Oscilla {
             engine: SynthEngine::new(sample_rate.load(Ordering::Relaxed)),
             wavetable_slot: Arc::new(WavetableSlot::new(Arc::new(default_table))),
             lua_source_slot: Arc::new(ArcSwap::from_pointee(String::from(
-                "function main(t)\n    return math.sin(t * math.pi * 2 * 440)\nend",
+                crate::script::DEFAULT_TIMEBASED_SCRIPT,
             ))),
             #[cfg(feature = "time-buffer")]
             time_buffer_slot: {
@@ -74,13 +89,14 @@ impl Default for Oscilla {
                         .unwrap_or_else(|_| vec![0.0f32; 44100]);
                 Arc::new(TimeBufferSlot::new(buf))
             },
+            #[cfg(not(feature = "time-buffer"))]
+            cached_lua_ctx: None,
             compiler: Arc::new(ScriptCompiler::new()),
             peak_output: Arc::new(AtomicF32::new(0.0)),
             scope_buffer: Arc::new(Mutex::new((Box::new([0.0f32; SCOPE_SIZE]), 0))),
-            scope_write_pos: 0,
+            next_scope_pos: 0,
             notifier: PollSubNotifier::new(),
             sample_rate,
-            last_compiled: String::new(),
         }
     }
 }
@@ -270,9 +286,7 @@ impl Default for OscillaParams {
 
             script_mode: IntParam::new("Script Mode", 0, IntRange::Linear { min: 0, max: 1 }),
 
-            wave_script: AtomicRefCell::new(String::from(
-                "function main(x)\n    return math.sin(x)\nend",
-            )),
+            wave_script: AtomicRefCell::new(String::from(crate::script::DEFAULT_WAVETABLE_SCRIPT)),
         }
     }
 }
@@ -452,88 +466,25 @@ impl Plugin for Oscilla {
         let mut had_events = false;
         let mut peak = 0.0f32;
 
-        let mode = match self.params.script_mode.modulated_plain_value() {
-            0 => ScriptMode::Wavetable,
-            _ => ScriptMode::TimeBased,
-        };
-        self.engine.script_mode = mode;
+        let mode = self.apply_block_params();
 
-        let script = self.params.wave_script.borrow().clone();
-        #[cfg(not(feature = "time-buffer"))]
-        let mut lua_ctx: Option<LuaContext> = None;
         #[cfg(feature = "time-buffer")]
         let time_buf_guard = self.time_buffer_slot.load();
 
-        if script != self.last_compiled {
-            match self.compiler.compile(&script, mode) {
-                Ok(()) => match mode {
-                    ScriptMode::Wavetable => {
-                        match LuaContext::compile(&script, ScriptMode::Wavetable) {
-                            Ok(ctx) => {
-                                let wt = generate_wavetable_from_lua(&ctx);
-                                self.wavetable_slot.store(wt);
-                            }
-                            Err(e) => {
-                                log::error!("Oscilla: Lua eval error: {e}");
-                                self.compiler.store_error(e);
-                            }
-                        }
-                    }
-                    ScriptMode::TimeBased => {
-                        #[cfg(feature = "time-buffer")]
-                        {
-                            let rate = self.sample_rate.load(Ordering::Relaxed);
-                            match crate::script::generate_time_buffer(&script, rate) {
-                                Ok(buf) => {
-                                    self.time_buffer_slot.store(Arc::new(buf));
-                                }
-                                Err(e) => {
-                                    log::error!("Oscilla: buffer gen: {e}");
-                                    self.compiler.store_error(e);
-                                }
-                            }
-                        }
-                        #[cfg(not(feature = "time-buffer"))]
-                        {
-                            self.lua_source_slot.store(Arc::new(script.clone()));
-                        }
-                    }
-                },
-                Err(e) => {
-                    log::error!("Oscilla: init compile error: {e}");
-                    self.compiler.store_error(e);
-                }
-            }
-            self.last_compiled = script;
-        }
-
-        // For time-based mode, compile the Lua context once per block.
+        // For time-based mode, compile the Lua context when source changes.
         #[cfg(not(feature = "time-buffer"))]
         if mode == ScriptMode::TimeBased {
             let src = self.lua_source_slot.load_full();
-            lua_ctx = LuaContext::compile(&src, ScriptMode::TimeBased).ok();
+            let needs_recompile = match &self.cached_lua_ctx {
+                Some(cached) => cached.0 != *src,
+                None => true,
+            };
+            if needs_recompile && let Ok(ctx) = LuaContext::compile(&src, ScriptMode::TimeBased) {
+                self.cached_lua_ctx = Some(CachedLua(src.to_string(), ctx));
+            }
         }
 
-        let ft = match self.params.filter_type.modulated_plain_value() {
-            0 => FilterType::LowPass,
-            1 => FilterType::HighPass,
-            _ => FilterType::BandPass,
-        };
-        self.engine.update_block_params(
-            self.params.attack.smoothed.next(),
-            self.params.decay.smoothed.next(),
-            self.params.sustain.smoothed.next(),
-            self.params.release.smoothed.next(),
-            self.params.filter_cutoff.smoothed.next(),
-            self.params.filter_resonance.smoothed.next(),
-            ft,
-            self.params.unison_voices.smoothed.next() as usize,
-            self.params.detune_cents.smoothed.next(),
-            self.params.stereo_width.smoothed.next(),
-            self.params.glide_time.smoothed.next(),
-        );
-
-        let mut scope_pos = self.scope_write_pos;
+        let mut scope_pos = self.next_scope_pos;
         let mut scope_local: [f32; SCOPE_SIZE] = [0.0; SCOPE_SIZE];
         let scope_local_start = scope_pos;
 
@@ -572,7 +523,9 @@ impl Plugin for Oscilla {
                 },
             );
             #[cfg(not(feature = "time-buffer"))]
-            let (l, r) = self.engine.process_sample(&table, lua_ctx.as_ref());
+            let lua_ref = self.cached_lua_ctx.as_ref().map(|cached| &cached.1);
+            #[cfg(not(feature = "time-buffer"))]
+            let (l, r) = self.engine.process_sample(&table, lua_ref);
 
             let mut ch = channel_samples.into_iter();
             if let Some(s) = ch.next() {
@@ -591,22 +544,69 @@ impl Plugin for Oscilla {
             scope_pos = (scope_pos + 1) % SCOPE_SIZE;
         }
 
-        self.scope_write_pos = scope_pos;
+        self.next_scope_pos = scope_pos;
+        self.flush_scope_buffer(&scope_local, scope_pos, scope_local_start);
 
-        // Copy the local scope buffer to the shared buffer (one mutex lock).
-        {
-            let mut guard = self.scope_buffer.lock().unwrap();
-            let (ref mut buf, ref mut pos) = *guard;
-            *pos = scope_pos;
-            if scope_pos > scope_local_start {
-                buf[scope_local_start..scope_pos]
-                    .copy_from_slice(&scope_local[scope_local_start..scope_pos]);
-            } else {
-                buf[scope_local_start..].copy_from_slice(&scope_local[scope_local_start..]);
-                buf[..scope_pos].copy_from_slice(&scope_local[..scope_pos]);
-            }
+        self.update_peak_meter(peak);
+
+        ProcessStatus::KeepAlive
+    }
+
+    fn deactivate(&mut self) {}
+}
+
+impl Oscilla {
+    /// Read mode and filter type from params and apply all block parameters.
+    /// Returns the current script mode.
+    fn apply_block_params(&mut self) -> ScriptMode {
+        let mode = match self.params.script_mode.modulated_plain_value() {
+            0 => ScriptMode::Wavetable,
+            _ => ScriptMode::TimeBased,
+        };
+        self.engine.script_mode = mode;
+
+        let ft = match self.params.filter_type.modulated_plain_value() {
+            0 => FilterType::LowPass,
+            1 => FilterType::HighPass,
+            _ => FilterType::BandPass,
+        };
+        self.engine.update_block_params(
+            self.params.attack.smoothed.next(),
+            self.params.decay.smoothed.next(),
+            self.params.sustain.smoothed.next(),
+            self.params.release.smoothed.next(),
+            self.params.filter_cutoff.smoothed.next(),
+            self.params.filter_resonance.smoothed.next(),
+            ft,
+            self.params.unison_voices.smoothed.next() as usize,
+            self.params.detune_cents.smoothed.next(),
+            self.params.stereo_width.smoothed.next(),
+            self.params.glide_time.smoothed.next(),
+        );
+        mode
+    }
+
+    /// Copy the local scope buffer to the shared ring buffer behind the mutex.
+    fn flush_scope_buffer(
+        &mut self,
+        scope_local: &[f32; SCOPE_SIZE],
+        scope_pos: usize,
+        scope_local_start: usize,
+    ) {
+        let mut guard = self.scope_buffer.lock().unwrap();
+        let (ref mut buf, ref mut pos) = *guard;
+        *pos = scope_pos;
+        if scope_pos > scope_local_start {
+            buf[scope_local_start..scope_pos]
+                .copy_from_slice(&scope_local[scope_local_start..scope_pos]);
+        } else {
+            buf[scope_local_start..].copy_from_slice(&scope_local[scope_local_start..]);
+            buf[..scope_pos].copy_from_slice(&scope_local[..scope_pos]);
         }
+    }
 
+    /// Update peak output with envelope following.
+    fn update_peak_meter(&self, peak: f32) {
         if self.params.window_state.is_open() {
             self.notifier.notify();
 
@@ -622,11 +622,7 @@ impl Plugin for Oscilla {
                 self.peak_output.store(new, Ordering::Relaxed);
             }
         }
-
-        ProcessStatus::KeepAlive
     }
-
-    fn deactivate(&mut self) {}
 }
 
 /// Generate a wavetable by evaluating a Lua function at 2048 phase points.

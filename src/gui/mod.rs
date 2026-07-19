@@ -504,8 +504,8 @@ impl OscillaGui {
 
                 // Swap default template when switching modes.
                 let current = self.editor_state.editor_handle.content();
-                let wt_default = "function main(x)\n  return math.sin(x)\nend";
-                let tb_default = "function main(t)\n  return math.sin(t * math.pi * 2 * 440)\nend";
+                let wt_default = crate::script::DEFAULT_WAVETABLE_SCRIPT;
+                let tb_default = crate::script::DEFAULT_TIMEBASED_SCRIPT;
                 let replacement = match mode {
                     ScriptMode::TimeBased if current.trim() == wt_default.trim() => {
                         Some(tb_default)

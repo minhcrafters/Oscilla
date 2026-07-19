@@ -51,6 +51,13 @@ impl std::fmt::Display for ScriptMode {
     }
 }
 
+/// Default sine-based wavetable script.
+pub const DEFAULT_WAVETABLE_SCRIPT: &str = "function main(x)\n    return math.sin(x)\nend";
+
+/// Default 440 Hz sine time-based script.
+pub const DEFAULT_TIMEBASED_SCRIPT: &str =
+    "function main(t)\n    return math.sin(t * math.pi * 2 * 440)\nend";
+
 // DSP primitives (pure Rust, registered into Lua as globals)
 
 fn phase_noise(x: f32) -> f32 {
@@ -110,7 +117,7 @@ fn lerp_table(table: mlua::Table, t: f32) -> mlua::Result<f32> {
         return Ok(0.0);
     }
     if len == 1 {
-        return Ok(table.get::<f32>(1)?);
+        return table.get::<f32>(1);
     }
     let pos = t * (len - 1) as f32;
     let idx = (pos.floor() as usize).min(len - 2);
@@ -408,22 +415,19 @@ mod tests {
 
     #[test]
     fn test_sine_validate() {
-        let src = "function main(x)\n    return math.sin(x)\nend";
-        assert!(validate_script(src).is_ok());
+        assert!(validate_script(DEFAULT_WAVETABLE_SCRIPT).is_ok());
     }
 
     #[test]
     fn test_sine_context() {
-        let src = "function main(x)\n    return math.sin(x)\nend";
-        let ctx = LuaContext::compile(src, ScriptMode::Wavetable).unwrap();
+        let ctx = LuaContext::compile(DEFAULT_WAVETABLE_SCRIPT, ScriptMode::Wavetable).unwrap();
         let val = ctx.eval_x(std::f32::consts::PI / 2.0);
         assert!((val - 1.0).abs() < 0.01);
     }
 
     #[test]
     fn test_sine_time() {
-        let src = "function main(t)\n    return math.sin(t * math.pi * 2 * 440)\nend";
-        let ctx = LuaContext::compile(src, ScriptMode::TimeBased).unwrap();
+        let ctx = LuaContext::compile(DEFAULT_TIMEBASED_SCRIPT, ScriptMode::TimeBased).unwrap();
         assert!(ctx.eval_t(0.0).abs() < 0.001);
         let t = 1.0 / (4.0 * 440.0);
         assert!((ctx.eval_t(t) - 1.0).abs() < 0.01);

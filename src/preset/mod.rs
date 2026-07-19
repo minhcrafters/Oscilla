@@ -41,7 +41,7 @@ impl Default for Preset {
     fn default() -> Self {
         Self {
             name: "Init".into(),
-            wave_script: "function main(x)\n    return math.sin(x)\nend".into(),
+            wave_script: crate::script::DEFAULT_WAVETABLE_SCRIPT.into(),
             script_mode: "wavetable".into(),
             filter_type: FilterType::LowPass,
             filter_cutoff: 20000.0, // wide open
