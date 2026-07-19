@@ -322,6 +322,7 @@ impl OscillaGui {
         editor_state.editor_handle.set_font(Font::MONOSPACE);
         editor_state.editor_handle.set_font_size(13.0, true);
         editor_state.editor_handle.set_folding_enabled(false);
+        editor_state.editor_handle.set_wrap_enabled(false);
         editor_state.editor_handle.set_theme(vscode_editor_style());
         editor_state
             .editor_handle
@@ -503,9 +504,8 @@ impl OscillaGui {
 
                 // Swap default template when switching modes.
                 let current = self.editor_state.editor_handle.content();
-                let wt_default = "function main(x)\n    return math.sin(x)\nend";
-                let tb_default =
-                    "function main(t)\n    return math.sin(t * math.pi * 2 * 440)\nend";
+                let wt_default = "function main(x)\n  return math.sin(x)\nend";
+                let tb_default = "function main(t)\n  return math.sin(t * math.pi * 2 * 440)\nend";
                 let replacement = match mode {
                     ScriptMode::TimeBased if current.trim() == wt_default.trim() => {
                         Some(tb_default)

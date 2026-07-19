@@ -172,14 +172,11 @@ pub fn validate_script(source: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Wrap user source into a callable Lua function.
-///
-/// The user's source is the body of a wrapper function.  Any code
-/// outside `function main(var)` (globals, helpers) runs once at
-/// compile time.  The wrapper automatically calls `main(var)` to
-/// produce each sample.
-fn wrap_script(source: &str, var: &str) -> String {
-    format!("return function({var})\n{source}\nreturn main({var})\nend")
+/// Wrap user source so that the `main` function is returned directly.
+/// The user's code runs once at load time (defining globals, helpers),
+/// and `main` is extracted as the callable function.
+fn wrap_script(source: &str, _var: &str) -> String {
+    format!("{source}\nreturn main")
 }
 
 /// Register `math.sin`, `math.pi`, etc. as a `math` global table.
@@ -233,11 +230,10 @@ fn register_math_table(lua: &Lua) -> mlua::Result<()> {
 ///
 /// Created on the audio thread when a new script needs to be evaluated.
 pub struct LuaContext {
+    // Lifetime anchor of `func`, references internal Lua FFI state.
     #[allow(dead_code)]
     lua: Lua,
     func: Function,
-    #[allow(dead_code)]
-    mode: ScriptMode,
 }
 
 impl LuaContext {
@@ -259,19 +255,19 @@ impl LuaContext {
             .eval()
             .map_err(|e| format!("Compilation error: {e}"))?;
 
-        Ok(Self { lua, func, mode })
+        Ok(Self { lua, func })
     }
 
     /// Evaluate the function at phase `x`.
     #[inline]
     pub fn eval_x(&self, x: f32) -> f32 {
-        self.func.call::<f32>((x,)).unwrap_or(0.0)
+        self.func.call::<f32>(x).unwrap_or(0.0)
     }
 
     /// Evaluate the function at time `t`.
     #[inline]
     pub fn eval_t(&self, t: f32) -> f32 {
-        self.func.call::<f32>((t,)).unwrap_or(0.0)
+        self.func.call::<f32>(t).unwrap_or(0.0)
     }
 }
 
