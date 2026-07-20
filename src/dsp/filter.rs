@@ -47,7 +47,7 @@ impl FilterType {
 
     /// Convert to the normalised parameter value (0.0..1.0 for a 3-choice IntParam).
     #[inline]
-    pub fn to_param_normalised(self) -> f32 {
+    pub fn to_param_normalized(self) -> f32 {
         self as i32 as f32 / 2.0
     }
 }

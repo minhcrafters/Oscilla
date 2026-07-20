@@ -1,38 +1,36 @@
-use crate::dsp::filter::FilterType;
+use crate::OscillaParams;
+use crate::OscillaTask;
 #[cfg(feature = "time-buffer")]
 use crate::dsp::TimeBufferSlot;
 use crate::dsp::WavetableSlot;
+use crate::dsp::filter::FilterType;
 use crate::preset::Preset;
 use crate::script::{ScriptCompiler, ScriptMode};
-use crate::wavetable::{SharedWavetable, SCOPE_SIZE};
-use crate::OscillaParams;
-use crate::OscillaTask;
+use crate::wavetable::{SCOPE_SIZE, SharedWavetable};
 use arc_swap::ArcSwap;
 use iced_audio::param::nice_to_iced;
 use iced_audio::{Gesture, Knob};
-use iced_code_editor::theme;
 use iced_code_editor::CodeEditor;
 use iced_code_editor::IndentStyle;
+use iced_code_editor::theme;
 use nice_plug::prelude::*;
 use nice_plug_iced::iced::Task;
 use nice_plug_iced::iced::{
-    border, font,
+    Background, Border, Center, Color, Element, Font, Length, Point, PollSubNotifier, Rectangle,
+    Renderer, Shadow, Size, Theme, Vector, border, font,
     mouse::Cursor,
     theme::Palette,
     widget::{
-        button,
+        Column, Container, Row, Space, button,
         canvas::{self, Canvas, Frame, Geometry, Program},
-        column, container, mouse_area, pick_list, row, scrollable, text, text_input, Column,
-        Container, Row, Space,
+        column, container, mouse_area, pick_list, row, scrollable, text, text_input,
     },
-    Background, Border, Center, Color, Element, Font, Length, Point, PollSubNotifier, Rectangle,
-    Renderer, Shadow, Size, Theme, Vector,
 };
 use nice_plug_iced::{EditorState, NiceGuiContext};
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::Ordering;
 
 /// Thread-safe handle for `CodeEditor`.
 ///

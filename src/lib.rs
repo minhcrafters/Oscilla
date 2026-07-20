@@ -535,10 +535,8 @@ impl Plugin for Oscilla {
 
         self.update_peak_meter(peak);
 
-        ProcessStatus::KeepAlive
+        ProcessStatus::Normal
     }
-
-    fn deactivate(&mut self) {}
 }
 
 impl Oscilla {

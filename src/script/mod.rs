@@ -90,11 +90,7 @@ fn saw(x: f32) -> f32 {
 
 fn square_default(x: f32) -> f32 {
     let t = x / (2.0 * std::f32::consts::PI);
-    if t.fract() < 0.5 {
-        1.0
-    } else {
-        -1.0
-    }
+    if t.fract() < 0.5 { 1.0 } else { -1.0 }
 }
 
 fn square_pw(x: f32, pw: f32) -> f32 {
@@ -352,7 +348,7 @@ pub fn generate_time_buffer(source: &str, sample_rate: f32) -> Result<Vec<f32>, 
             let base = chunk_idx * chunk_size;
             for (j, s) in chunk.iter_mut().enumerate() {
                 let t = (base + j) as f32 * inv_sr;
-                *s = func.call::<f32>((t,)).unwrap_or(0.0).clamp(-4.0, 4.0);
+                *s = func.call::<f32>(t).unwrap_or(0.0).clamp(-4.0, 4.0);
             }
         });
 

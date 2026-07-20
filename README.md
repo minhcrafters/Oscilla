@@ -41,7 +41,7 @@ end
 
 | Flag | Effect |
 |------|--------|
-| *(default)* | Per-sample evaluation |
+| *none* | Per-sample evaluation |
 | `time-buffer` | Pre-render 8s buffer |
 
 ## Presets
