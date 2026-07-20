@@ -699,7 +699,7 @@ fn compile_backend(
 
 impl ClapPlugin for Oscilla {
     const CLAP_ID: &'static str = "me.pychael.oscilla";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("Programmable oscillator synthesizer");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("Programmable oscillator synthesiser");
     const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[

@@ -45,9 +45,9 @@ impl FilterType {
         }
     }
 
-    /// Convert to the normalized parameter value (0.0..1.0 for a 3-choice IntParam).
+    /// Convert to the normalised parameter value (0.0..1.0 for a 3-choice IntParam).
     #[inline]
-    pub fn to_param_normalized(self) -> f32 {
+    pub fn to_param_normalised(self) -> f32 {
         self as i32 as f32 / 2.0
     }
 }
@@ -126,7 +126,7 @@ impl Svf {
 
     /// Check whether the filter state has blown up and reset if so.
     #[inline]
-    fn sanitize(&mut self) {
+    fn sanitise(&mut self) {
         if !self.lp.is_finite()
             || !self.bp.is_finite()
             || self.lp.abs() > STATE_BLOWUP_LIMIT
@@ -152,7 +152,7 @@ impl Svf {
         self.lp += self.f * self.bp;
 
         // Safety: clamp state to prevent NaN propagation.
-        self.sanitize();
+        self.sanitise();
 
         match self.mode {
             FilterType::LowPass => self.lp,
