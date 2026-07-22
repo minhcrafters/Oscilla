@@ -126,6 +126,24 @@ pub fn btn_style(hovered: bool) -> button::Style {
     }
 }
 
+pub fn accent_btn_style(_theme: &nice_plug_iced::iced::Theme, status: button::Status) -> button::Style {
+    match status {
+        button::Status::Active => btn_style(false),
+        button::Status::Hovered | button::Status::Pressed => btn_style(true),
+        _ => button::Style {
+            background: Some(Background::Color(SURFACE)),
+            border: Border {
+                color: BORDER,
+                width: 1.0,
+                radius: rad(3.0),
+            },
+            text_color: FG_DIM,
+            shadow: Shadow::default(),
+            snap: false,
+        },
+    }
+}
+
 pub fn picklist_style() -> pick_list::Style {
     pick_list::Style {
         text_color: FG_TEXT,

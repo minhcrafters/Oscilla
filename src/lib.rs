@@ -65,7 +65,6 @@ unsafe impl Sync for CachedLua {}
 // Background tasks
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum OscillaTask {
     CompileScript { source: String, mode: ScriptMode },
 }
@@ -277,6 +276,7 @@ impl Plugin for Oscilla {
             }
         }
 
+        let editor_open = self.params.window_state.is_open();
         let mut scope_pos = self.next_scope_pos;
         let mut scope_local: [f32; SCOPE_SIZE] = [0.0; SCOPE_SIZE];
         let scope_local_start = scope_pos;
@@ -333,12 +333,16 @@ impl Plugin for Oscilla {
                 peak = abs;
             }
 
-            scope_local[scope_pos] = (l + r) * 0.5;
-            scope_pos = (scope_pos + 1) % SCOPE_SIZE;
+            if editor_open {
+                scope_local[scope_pos] = (l + r) * 0.5;
+                scope_pos = (scope_pos + 1) % SCOPE_SIZE;
+            }
         }
 
-        self.next_scope_pos = scope_pos;
-        self.flush_scope_buffer(&scope_local, scope_pos, scope_local_start);
+        if editor_open {
+            self.next_scope_pos = scope_pos;
+            self.flush_scope_buffer(&scope_local, scope_pos, scope_local_start);
+        }
 
         self.update_peak_meter(peak);
 

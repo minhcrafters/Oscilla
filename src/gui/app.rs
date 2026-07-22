@@ -41,28 +41,8 @@ fn arc_knob<'a>(
     .align_x(Center)
 }
 
-#[allow(dead_code)]
-fn bipolar_knob<'a>(
-    label: &'a str,
-    value: String,
-    param: &'a FloatParam,
-    gesture: fn(Gesture) -> Message,
-) -> Column<'a, Message> {
-    let ip = nice_to_iced(param);
-    column![
-        knob_label(label),
-        Knob::new(ip)
-            .on_gesture(gesture)
-            .style(knob_style::ArcBipolarKnob),
-        value_label(value)
-    ]
-    .spacing(3)
-    .align_x(Center)
-}
-
 pub struct OscillaGui {
     editor_state: EditorState<OscillaEditorState>,
-    #[allow(dead_code)]
     nice_ctx: NiceGuiContext,
     status_message: String,
     compile_ok: bool,
@@ -444,7 +424,7 @@ impl OscillaGui {
             0.0
         };
         setter.begin_set_parameter(&p.script_mode);
-        setter.set_parameter_normalized(&p.script_mode, mode_val / 1.0);
+        setter.set_parameter_normalized(&p.script_mode, mode_val);
         setter.end_set_parameter(&p.script_mode);
 
         let _ = self.editor_state.editor_handle.reset(&preset.wave_script);
@@ -483,21 +463,7 @@ impl OscillaGui {
         let compile_btn = button(btn_text("Apply"))
             .on_press(Message::CompileScript)
             .padding([6, 18])
-            .style(|_theme, status| match status {
-                button::Status::Active => btn_style(false),
-                button::Status::Hovered | button::Status::Pressed => btn_style(true),
-                _ => button::Style {
-                    background: Some(Background::Color(SURFACE)),
-                    border: Border {
-                        color: BORDER,
-                        width: 1.0,
-                        radius: rad(3.0),
-                    },
-                    text_color: FG_DIM,
-                    shadow: Shadow::default(),
-                    snap: false,
-                },
-            });
+            .style(accent_btn_style);
 
         let mode = ScriptMode::from_param_value(p.script_mode.modulated_plain_value());
 
@@ -517,39 +483,11 @@ impl OscillaGui {
         let save_btn = button(btn_text("Save"))
             .on_press(Message::SavePreset)
             .padding([6, 18])
-            .style(|_theme, status| match status {
-                button::Status::Active => btn_style(false),
-                button::Status::Hovered | button::Status::Pressed => btn_style(true),
-                _ => button::Style {
-                    background: Some(Background::Color(SURFACE)),
-                    border: Border {
-                        color: BORDER,
-                        width: 1.0,
-                        radius: rad(3.0),
-                    },
-                    text_color: FG_DIM,
-                    shadow: Shadow::default(),
-                    snap: false,
-                },
-            });
+            .style(accent_btn_style);
         let load_btn = button(btn_text("Load"))
             .on_press(Message::LoadPreset)
             .padding([6, 18])
-            .style(|_theme, status| match status {
-                button::Status::Active => btn_style(false),
-                button::Status::Hovered | button::Status::Pressed => btn_style(true),
-                _ => button::Style {
-                    background: Some(Background::Color(SURFACE)),
-                    border: Border {
-                        color: BORDER,
-                        width: 1.0,
-                        radius: rad(3.0),
-                    },
-                    text_color: FG_DIM,
-                    shadow: Shadow::default(),
-                    snap: false,
-                },
-            });
+            .style(accent_btn_style);
 
         let editor_panel = container(
             column![

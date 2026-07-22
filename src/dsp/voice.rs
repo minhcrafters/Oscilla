@@ -32,6 +32,8 @@ pub struct Voice {
     #[cfg(feature = "time-buffer")]
     pub time_buf_pos: f32,
     pub sample_rate: f32,
+    pub inv_sample_rate: f32,
+    pub pitch_ratio: f32,
 }
 
 impl Voice {
@@ -55,6 +57,8 @@ impl Voice {
             #[cfg(feature = "time-buffer")]
             time_buf_pos: 0.0,
             sample_rate,
+            inv_sample_rate: 1.0 / sample_rate,
+            pitch_ratio: 1.0,
         }
     }
 
@@ -95,6 +99,7 @@ impl Voice {
         self.active = true;
         self.age = 0;
         self.time_elapsed = 0.0;
+        self.pitch_ratio = (2.0f32).powf((note as f32 - 69.0) / 12.0);
         #[cfg(feature = "time-buffer")]
         {
             self.time_buf_pos = 0.0;
@@ -127,11 +132,7 @@ impl Voice {
                 self.unison_detunes[i] = 1.0;
                 self.unison_pans[i] = 0.0;
             } else {
-                let t = if n == 1 {
-                    0.0
-                } else {
-                    (i as f32 / (n - 1) as f32) * 2.0 - 1.0
-                };
+                let t = (i as f32 / (n - 1) as f32) * 2.0 - 1.0;
                 self.unison_detunes[i] = (2.0f32).powf(t * detune_semitones / 12.0);
                 self.unison_pans[i] = t * width;
             }
@@ -195,7 +196,7 @@ impl Voice {
         right = right.clamp(-4.0, 4.0);
 
         self.age += 1;
-        self.time_elapsed += 1.0 / self.sample_rate;
+        self.time_elapsed += self.inv_sample_rate;
 
         if self.finished() {
             self.active = false;
@@ -216,8 +217,7 @@ impl Voice {
             self.inc = self.inc * self.glide_rate + self.inc_target * (1.0 - self.glide_rate);
         }
 
-        let pitch_ratio = (2.0f32).powf((self.note as f32 - 69.0) / 12.0);
-        let effective_t = self.time_elapsed * pitch_ratio;
+        let effective_t = self.time_elapsed * self.pitch_ratio;
 
         let sample = ctx.eval_t(effective_t);
 
@@ -236,7 +236,7 @@ impl Voice {
         right = right.clamp(-4.0, 4.0);
 
         self.age += 1;
-        self.time_elapsed += 1.0 / self.sample_rate;
+        self.time_elapsed += self.inv_sample_rate;
 
         if self.finished() {
             self.active = false;
@@ -288,7 +288,7 @@ impl Voice {
         right = right.clamp(-4.0, 4.0);
 
         self.age += 1;
-        self.time_elapsed += 1.0 / self.sample_rate;
+        self.time_elapsed += self.inv_sample_rate;
         if self.finished() {
             self.active = false;
         }

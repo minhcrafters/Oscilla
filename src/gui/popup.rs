@@ -132,21 +132,7 @@ fn popup_button(label: &str, msg: Message) -> button::Button<'_, Message> {
     button(btn_text(label))
         .on_press(msg)
         .padding([6, 18])
-        .style(|_theme, status| match status {
-            button::Status::Active => btn_style(false),
-            button::Status::Hovered | button::Status::Pressed => btn_style(true),
-            _ => button::Style {
-                background: Some(Background::Color(SURFACE)),
-                border: Border {
-                    color: BORDER,
-                    width: 1.0,
-                    radius: rad(3.0),
-                },
-                text_color: FG_DIM,
-                shadow: Shadow::default(),
-                snap: false,
-            },
-        })
+        .style(accent_btn_style)
 }
 
 pub fn preset_dir() -> Option<std::path::PathBuf> {

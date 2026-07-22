@@ -107,7 +107,7 @@ impl SynthEngine {
     }
 
     pub fn process_events(&mut self) {
-        let commands: SmallVec<[NoteCmd; 32]> = self.pending.drain(..).collect();
+        let commands = std::mem::take(&mut self.pending);
         for cmd in commands {
             match cmd {
                 NoteCmd::On { note, velocity } => self.voice_on(note, velocity),
