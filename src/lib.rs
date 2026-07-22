@@ -48,8 +48,6 @@ pub struct Oscilla {
     next_scope_pos: usize,
     sample_rate: Arc<AtomicF32>,
     notifier: PollSubNotifier,
-    /// Set on the first `process()` call to trigger initial script compilation.
-    needs_init_compile: bool,
 }
 
 /// Wrapper around `LuaContext` that asserts `Send` and `Sync`.
@@ -99,7 +97,6 @@ impl Default for Oscilla {
             next_scope_pos: 0,
             notifier: PollSubNotifier::new(),
             sample_rate,
-            needs_init_compile: true,
         }
     }
 }
@@ -425,11 +422,17 @@ impl Plugin for Oscilla {
         &mut self,
         _audio_io_layout: &AudioIOLayout,
         buffer_config: &BufferConfig,
-        _context: &mut impl InitContext<Self>,
+        context: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate
             .store(buffer_config.sample_rate, Ordering::Relaxed);
         self.engine.set_sample_rate(buffer_config.sample_rate);
+
+        let source = self.params.wave_script.borrow().clone();
+        let mode =
+            ScriptMode::from_param_value(self.params.script_mode.unmodulated_plain_value());
+        context.execute(OscillaTask::CompileScript { source, mode });
+
         true
     }
 
@@ -445,14 +448,6 @@ impl Plugin for Oscilla {
         let mut peak = 0.0f32;
 
         let mode = self.apply_block_params();
-
-        // One-time compilation of the persisted script on first load.
-        // Safe because audio hasn't started yet; the host calls process()
-        // to prime buffers before transport starts.
-        if self.needs_init_compile {
-            self.needs_init_compile = false;
-            self.compile_init_script(mode);
-        }
 
         #[cfg(feature = "time-buffer")]
         let time_buf_guard = self.time_buffer_slot.load();
@@ -535,7 +530,7 @@ impl Plugin for Oscilla {
 
         self.update_peak_meter(peak);
 
-        ProcessStatus::Normal
+        ProcessStatus::KeepAlive
     }
 }
 
@@ -601,32 +596,6 @@ impl Oscilla {
         }
     }
 
-    /// Compile the persisted script on first load.
-    /// Called once from `process()` before any audio is playing.
-    fn compile_init_script(&mut self, mode: ScriptMode) {
-        let script = self.params.wave_script.borrow().clone();
-        match mode {
-            ScriptMode::Wavetable => {
-                if let Ok(ctx) = LuaContext::compile(&script, ScriptMode::Wavetable) {
-                    let wt = generate_wavetable_from_lua(&ctx);
-                    self.wavetable_slot.store(wt);
-                }
-            }
-            ScriptMode::TimeBased => {
-                #[cfg(feature = "time-buffer")]
-                {
-                    let rate = self.sample_rate.load(Ordering::Relaxed);
-                    if let Ok(buf) = crate::script::generate_time_buffer(&script, rate) {
-                        self.time_buffer_slot.store(Arc::new(buf));
-                    }
-                }
-                #[cfg(not(feature = "time-buffer"))]
-                {
-                    self.lua_source_slot.store(Arc::new(script));
-                }
-            }
-        }
-    }
 }
 
 /// Generate a wavetable by evaluating a Lua function at 2048 phase points.
